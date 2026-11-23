@@ -1,7 +1,7 @@
 ---
 title: How to run and debug a Next.js app with a coding agent
 nav_title: Debugging with a coding agent
-description: Use your running Next.js app to investigate render errors, debug browser interactions, and verify a fix with a coding agent.
+description: Use your running Next.js app to check a route, debug browser interactions, and verify a fix with a coding agent.
 ---
 
 Your coding agent can ask the running Next.js dev server for diagnostics directly. You don't need to install a skill or configure an MCP client.
@@ -14,9 +14,12 @@ Run your project's development script, such as `npm run dev`. If `next dev` repo
 
 On Next.js 16 and later, `next dev` exposes an HTTP endpoint at `/_next/mcp`. Your agent sends `tools/list` there to discover what's available in your installed version. To use one of those tools, it sends `tools/call` **to the same endpoint** with the tool name and its arguments.
 
-- **A route won't render:** Call `check_route` with `{"path":"/settings"}`, substituting the actual path and query string. No browser is required. Read `compilationIssues` and `validation.errors` for the source location. With Cache Components enabled, `"validated"` with no errors means the render passed. If it says `"not-run"`, read the reason; even `ok: true` doesn't mean validation ran.
-- **Something breaks in the browser:** Open the affected page, reproduce the issue, then call `get_errors` with no arguments. It reads the connected browser's error state. If you see a badge, the [DevTools guide](https://github.com/vercel/next.js/blob/ecc4775a74f65b1376e8fc571dfc885692f1fabb/docs/01-app/02-guides/devtools.mdx#issues-and-insights) explains errors and navigation Insights.
-- **You need the server output:** Call `get_logs` with no arguments. It returns the path to the development log; your agent can then read that file.
+Start with `check_route` to check a route for problems. Pass the path and query string, for example `{"path":"/settings"}`. It compiles and requests the route without a browser. Read `compilationIssues` for compiler diagnostics and, with Cache Components enabled, `validation.errors` for what Next.js found when it validated the route.
+
+A page can render and still show an amber **Insight** if a navigation has to wait for data. See [Issues and Insights](https://github.com/vercel/next.js/blob/ecc4775a74f65b1376e8fc571dfc885692f1fabb/docs/01-app/02-guides/devtools.mdx#issues-and-insights) for what the badge means and [Validate instant navigation](/docs/app/guides/instant-navigation#validate-instant-navigation) for which navigations Next.js checks.
+
+- **For a browser error**, open the page, reproduce the problem, then call `get_errors` with no arguments. It reads the connected browser's error state.
+- **For log output**, call `get_logs` with no arguments and read the file at the path it returns.
 
 <details>
 <summary>See the HTTP requests</summary>
@@ -48,7 +51,9 @@ If your agent already has the optional [Next.js DevTools MCP connector](/docs/ap
 
 ## Verify the fix
 
-Repeat the steps that failed, in the same session and mode. For a render error, check that the route now passes validation. For an interaction, try it in the browser and check both the visible result and the console. The optional [`next-dev-loop` skill](/docs/app/guides/ai-agents#next-dev-loop) can help your agent do that.
+After editing the route, call `check_route` again with the same path and query string. Check that the original diagnostic is gone. For a validation fix, look for `validation.status` of `"validated"` and an empty `validation.errors` array. If the status is `"not-run"`, read `validation.reason`; the route hasn't been validated, even if `ok` is `true`.
+
+For a browser interaction, repeat the steps that exposed the problem and check the visible result and the console. The optional [`next-dev-loop` skill](/docs/app/guides/ai-agents#next-dev-loop) can help your agent do that.
 
 If the issue happens while a navigation is pending, a check after the page settles will miss it. The [Instant Navigation guide](/docs/app/guides/instant-navigation#prevent-regressions-with-e2e-tests) shows how to assert what appears before the response arrives.
 
