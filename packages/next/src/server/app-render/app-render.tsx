@@ -99,6 +99,7 @@ import {
   createWorkStore,
 } from '../async-storage/work-store'
 import { formatValidationEvent } from './dev-validation-events'
+import { reportDevValidationResult } from './dev-validation-results'
 import { createSnapshot } from './async-local-storage'
 import {
   getDevValidationWorker,
@@ -4960,6 +4961,15 @@ function runDevValidationInBackground(
                   }
                 )
 
+                reportDevValidationResult(
+                  getValidationUrl(ctx),
+                  validationAbortSignal.aborted ||
+                    workerResult.messages === null
+                    ? 'aborted'
+                    : 'validated',
+                  workerResult.messages ?? []
+                )
+
                 // A newer navigation may have superseded this validation while
                 // the worker ran; don't surface stale insights for a page the user
                 // left.
@@ -5017,6 +5027,14 @@ function runDevValidationInBackground(
                       fallbackRouteParams,
                       devRenderDidError,
                       validationAbortSignal
+                    )
+
+                    reportDevValidationResult(
+                      getValidationUrl(ctx),
+                      // `undefined` without an abort means validation ran and
+                      // found nothing.
+                      validationAbortSignal.aborted ? 'aborted' : 'validated',
+                      validationErrors ?? []
                     )
 
                     if (
@@ -5472,6 +5490,9 @@ async function resolveLazyDevValidationInputs(
   }
 
   if ('syncInterruptReason' in inputs) {
+    reportDevValidationResult(getValidationUrl(ctx), 'validated', [
+      inputs.syncInterruptReason,
+    ])
     await logMessagesAndSendErrorsToBrowser(
       [inputs.syncInterruptReason],
       ctx,
@@ -5489,6 +5510,9 @@ function forwardErrorsFromWarmRender(
   ctx: AppRenderContext
 ) {
   if ('syncInterruptReason' in inputs) {
+    reportDevValidationResult(getValidationUrl(ctx), 'validated', [
+      inputs.syncInterruptReason,
+    ])
     void logMessagesAndSendErrorsToBrowser(
       [inputs.syncInterruptReason],
       ctx,
@@ -6708,7 +6732,12 @@ async function logMessagesAndSendErrorsToBrowser(
   }
 }
 
+function getValidationUrl(ctx: Pick<AppRenderContext, 'url'>): string {
+  return ctx.url.pathname + ctx.url.search
+}
+
 function logValidationSkipped(ctx: AppRenderContext) {
+  reportDevValidationResult(getValidationUrl(ctx), 'skipped')
   if (process.env.__NEXT_TEST_MODE && process.env.NEXT_TEST_LOG_VALIDATION) {
     const requestId = ctx.requestId
     const url = ctx.url.href
@@ -6722,6 +6751,7 @@ function logValidationSkipped(ctx: AppRenderContext) {
 }
 
 function logValidationAborted(ctx: AppRenderContext) {
+  reportDevValidationResult(getValidationUrl(ctx), 'aborted')
   if (process.env.__NEXT_TEST_MODE && process.env.NEXT_TEST_LOG_VALIDATION) {
     const requestId = ctx.requestId
     const url = ctx.url.href

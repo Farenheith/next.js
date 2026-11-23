@@ -146,6 +146,11 @@ export type DevValidationWorkerMessage = DevValidationSnapshot &
  */
 export type DevValidationWorkerResult = {
   chunks: Uint8Array[] | null
+  /**
+   * The message of every validation error, or null when validation was
+   * superseded or did not run. An empty array means it ran and found nothing.
+   */
+  messages: string[] | null
   localSpans: LocalSpanBatch | null
 }
 
