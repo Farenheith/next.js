@@ -1,49 +1,52 @@
 ---
-title: How to verify a change in a running Next.js app
+title: How to verify App Router changes with a coding agent
 nav_title: Verifying changes
-description: Check a page for render errors, test what users see during an interaction, and decide when you need a production build.
+description: Use the running Next.js server to check a route, then test what the user sees before and after an interaction.
 ---
 
-Start with the behavior you changed. Next.js can tell you whether a route compiles and whether its server render reports an error. To find out whether a button responds, content moves, or the right data appears after a click, exercise that interaction in a browser.
+Suppose you've changed a product page. Does it render without errors? Does the purchase button move when stock arrives? The dev server can answer the first question. For the second, open the app and try the click.
 
-## Check the route while editing
+## 1. Check the changed route
 
-Suppose you've changed the product page at `/products/mug`. Start `next dev`, or use the server already running for the project. With [Next.js DevTools MCP](/docs/app/guides/mcp) connected, use `nextjs_index` to discover the server and its tools. If it lists `check_route`, use `nextjs_call` to call it with `{"path":"/products/mug"}`. Use a concrete URL from the app, including the query string if it changes what's rendered.
+1. Start `next dev`, or reuse the server already running for the project.
+2. With [Next.js DevTools MCP](/docs/app/guides/mcp), use `nextjs_index` to list the server's tools. If it lists `check_route`, use `nextjs_call` to call it with a real path, such as `{"path":"/products/mug"}`. Include the query string if it affects the page.
+3. Read `compilationIssues` and `validation`. With Cache Components enabled, `"validated"` with no errors means this render passed. If you get an error, follow its source location and check the route again. If you get `"not-run"`, read the reason: a redirect, for example, means the requested page never rendered. Even `ok: true` can accompany a skipped validation.
 
-You can also call the running dev server directly. Use the port printed by `next dev`:
+<details>
+<summary>Call the dev server directly without an MCP client</summary>
+
+Use the port printed by `next dev`:
 
 ```bash filename="Terminal"
-curl -sS http://localhost:3000/_next/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-If the list includes `check_route`, send a second request to the same endpoint with this body:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "tools/call",
-  "params": { "name": "check_route", "arguments": { "path": "/products/mug" } }
+mcp() {
+  curl -sS http://localhost:3000/_next/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "$1"
 }
+
+mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-Read the tool result, including `httpStatus`, `compilationIssues`, and `validation`. With Cache Components enabled, `validation.status: "validated"` and an empty `errors` array mean the render passed that validation. An error can include an app source location. If the status is `"not-run"`, read the reason: for example, a redirect means the requested page did not render. A successful HTTP response or `ok: true` alone doesn't establish that validation ran. For a page that needs a signed-in session, also open it in that session.
+If the server lists `check_route`, call it with the path you changed:
 
-## Try the interaction before and after the data arrives
+```bash filename="Terminal"
+mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check_route","arguments":{"path":"/products/mug"}}}'
+```
 
-Open the product list and **click its link** to the product. Typing the product URL tests a direct visit; it skips the list, the link's prefetch, and the user's click. Use a fresh browser context for the first visit, then navigate away and back to see what changes on a repeat visit.
+</details>
 
-Give the slow response time to remain pending. If you're checking a [prefetched navigation](/docs/app/guides/optimizing-prefetching), use the [Playwright `instant()` helper](/docs/app/guides/testing/playwright#testing-instant-navigations). Assert what should already be visible **inside** the hold, then release it and check the final content. An assertion made only after the response arrives can't tell you what the user saw while waiting.
+## 2. Try the click in a browser
 
-For example, if the product name should appear immediately but availability loads later, check that the name and navigation remain usable, that the stock area shows feedback, and that the purchase button doesn't move under the pointer when the stock arrives. Repeat at a narrow viewport. For a filter or selection, try a second choice while the first is pending; confirm which choice is active and which result eventually wins. Check the browser console and the development overlay after the interaction, including hydration errors that a server request cannot see.
+Start from the product list in a fresh browser session and click the product link. Opening its URL directly skips [link prefetching](/docs/app/guides/optimizing-prefetching). Use the browser you already have, a Playwright test, or the [Dev Loop skill](/docs/app/guides/ai-agents#next-dev-loop).
 
-Use your browser, an existing browser test, or the [Dev Loop skill](/docs/app/guides/ai-agents#next-dev-loop) for this step. A screenshot of the settled page won't show an earlier layout shift. If a performance recording has no sample for the interaction, repeat the measurement before drawing a conclusion.
+| When                   | What to check                                                                                                                                                                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| While stock is loading | The product name is visible, the stock area shows feedback, and the navigation still works. With Playwright's [`instant()` helper](/docs/app/guides/testing/playwright#testing-instant-navigations), make these assertions **inside** the hold. |
+| When stock arrives     | The placeholder gives way to the stock count without moving the purchase button. Try a narrow viewport and check the console and dev overlay for errors.                                                                                        |
+| On a repeat visit      | Change the product or selection, navigate away, then come back. Verify the current value. For private data, repeat in a second session and check that each user sees their own data.                                                            |
 
-## Reproduce production behavior when it matters
+## 3. Check production behavior when it matters
 
-Use a normal `next build` and `next start` for a final check of production output or automatic link prefetching. Repeat the same click from the same starting page. When you change a cache, test the underlying data too: update the product through the app, reopen it, and verify that the new value appears. If the page also has private data, check a second session to make sure it sees its own values.
-
-If a prerender error appears only during the build, run [`next build --debug-prerender`](/docs/app/guides/building#debug-prerender-errors) to get readable server frames. For a large app, [`--debug-build-paths`](/docs/app/api-reference/cli/next#building-specific-routes) can narrow the investigation to the affected routes. Use a normal build for the final verification; don't deploy the diagnostic build.
+- **Checking automatic prefetching or production output?** Run a normal `next build` and `next start`, then repeat the same navigation.
+- **A prerender error only appears during the build?** Use [`next build --debug-prerender`](/docs/app/guides/building#debug-prerender-errors) for readable server frames. In a large app, [`--debug-build-paths`](/docs/app/api-reference/cli/next#building-specific-routes) limits the build to selected routes. Don't deploy the diagnostic build.
