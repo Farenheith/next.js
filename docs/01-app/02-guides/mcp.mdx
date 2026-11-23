@@ -9,9 +9,9 @@ related:
 
 The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is an open standard that lets AI agents and coding assistants interact with your applications through one shared interface.
 
-In Next.js 16 and later, the development server exposes an MCP endpoint at `/_next/mcp`. It gives coding agents the running app's view of errors, routes, logs, and compilation issues. To connect your agent client to it, install the [`next-devtools-mcp`](https://www.npmjs.com/package/next-devtools-mcp) package.
+In Next.js 16 and later, the development server exposes an MCP endpoint at `/_next/mcp`. It gives coding agents the running app's view of errors, routes, logs, and compilation issues.
 
-Skills such as [`next-dev-loop`](/docs/app/guides/ai-agents#next-dev-loop) call `/_next/mcp` directly, so they work without this setup.
+An agent can [call the HTTP endpoint directly](/docs/app/guides/debugging-with-agents#find-the-error), without installing anything. The optional [`next-devtools-mcp`](https://www.npmjs.com/package/next-devtools-mcp) connector makes these tools available in your agent's configured MCP client.
 
 ## Getting started
 
@@ -63,8 +63,6 @@ Through `nextjs_call`, agents can use the tools the Next.js development server e
 - **`get_request_insights`**: Get recent App Router request timelines, server fetches, and cache behavior captured by the local span recorder. Requires `experimental.requestInsights`.
 
 With the compilation tools, agents can check whether code compiles from the running dev server instead of running `next build` while they are still editing.
-
-For a worked example of calling the endpoint directly and interpreting its result, see [Running and debugging an app with a coding agent](/docs/app/guides/debugging-with-agents#find-the-error).
 
 ## Development workflow
 
