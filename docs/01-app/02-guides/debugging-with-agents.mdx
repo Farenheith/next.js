@@ -1,0 +1,61 @@
+---
+title: How to run and debug a Next.js app as a coding agent
+nav_title: Debugging with coding agents
+description: Start the development server, locate a route or browser error, and verify the fix in the running app.
+---
+
+When debugging on behalf of a user, turn what they saw into something you can check. For a page that won't render, query the running Next.js server for the error. For a button that moves as stock loads, drive the browser and compare its position before and after the response.
+
+## Start the app
+
+From the app's directory, run its development script. For an npm project with a `dev` script:
+
+```bash filename="Terminal"
+npm run dev
+```
+
+Use the URL and port printed by `next dev`. If Next.js reports that the project already has a dev server, reuse it. Open the affected page and repeat the action that failed. For a signed-in page, use a browser session signed in as the affected user.
+
+## Find the error
+
+| What failed?                                 | Where to look                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A page won't compile or render               | With [Next.js DevTools MCP](/docs/app/guides/mcp), call `nextjs_index` to list the running server's tools. If it lists `check_route`, use `nextjs_call` to call it with a real path such as `{"path":"/products/mug"}`. Include the query string if it changes the page.                                                                                                                                           |
+| A click fails, or hydration reports an error | Repeat the action with the browser open. Read the browser console and call `get_errors` for errors from the connected browser. If the user saw an Insight in the badge, the [Next.js DevTools guide](https://github.com/vercel/next.js/blob/ecc4775a74f65b1376e8fc571dfc885692f1fabb/docs/01-app/02-guides/devtools.mdx#issues-and-insights) explains what it means. Use `get_logs` to locate the development log. |
+| Only a production build fails to prerender   | Run [`next build --debug-prerender`](/docs/app/guides/building#debug-prerender-errors) for readable server frames. Use [`--debug-build-paths`](/docs/app/api-reference/cli/next#building-specific-routes) to narrow a large build to the affected routes. Don't deploy the diagnostic build.                                                                                                                       |
+
+For `check_route`, read `compilationIssues` and `validation`. With Cache Components enabled, `"validated"` with no errors means **this render** passed validation. If it reports an error, follow the source location. If it says `"not-run"`, read the reason. For example, the request may have redirected to sign-in. A response with `ok: true` can still have skipped validation.
+
+<details>
+<summary>Call the dev server directly without an MCP client</summary>
+
+Replace port 3000 with the port your server printed. List the tools before calling one; the available tools depend on the installed Next.js version.
+
+```bash filename="Terminal"
+mcp() {
+  curl -sS http://localhost:3000/_next/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "$1"
+}
+
+mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+If the list includes `check_route`, send the concrete page path:
+
+```bash filename="Terminal"
+mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check_route","arguments":{"path":"/products/mug"}}}'
+```
+
+</details>
+
+## Verify the fix
+
+Repeat the original action from the same starting point. For the purchase button example:
+
+1. **While stock is loading:** Click the product link from the list. Confirm the product name is already visible and the stock area shows feedback. For [instant navigation](/docs/app/guides/instant-navigation#prevent-regressions-with-e2e-tests), assert what's visible _inside_ Playwright's [`instant()` hold](/docs/app/guides/testing/playwright#testing-instant-navigations).
+2. **When stock arrives:** Check that the stock count replaces the placeholder without moving the button. Try it at a narrow width and check for new console or overlay errors.
+3. **On a repeat visit:** Change the stock through the app, navigate away, and return. Check that the updated value appears. If the change affects private data, verify it in a second session too.
+
+You can use an existing browser test or the optional [`next-dev-loop` skill](/docs/app/guides/ai-agents#next-dev-loop) for these checks. To verify automatic prefetching in production, run a normal `next build` and `next start` and repeat the click from the list.
