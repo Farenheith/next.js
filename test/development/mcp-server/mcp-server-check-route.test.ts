@@ -103,4 +103,12 @@ describe('mcp-server check_route tool', () => {
 
     expect(result.error).toBe('Provide a path that starts with a single "/".')
   })
+
+  it('rejects a path that resolves to another origin', async () => {
+    const result = await callMcpTool(next.url, 'check_route', {
+      path: '/\\\\example.com/',
+    })
+
+    expect(result.error).toBe('Provide a path that starts with a single "/".')
+  })
 })

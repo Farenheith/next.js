@@ -74,6 +74,14 @@ export function registerCheckRouteTool(
       }
 
       const target = new URL(path, devServerUrl)
+      // URL parsing treats a backslash as a slash, so a path such as `/\\host`
+      // resolves to another origin. Only ever request this dev server.
+      if (target.origin !== new URL(devServerUrl).origin) {
+        return failure({
+          path,
+          error: 'Provide a path that starts with a single "/".',
+        })
+      }
       const url = target.pathname + target.search
 
       let routeSpecifier: string | undefined
