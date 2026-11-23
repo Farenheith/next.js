@@ -4,7 +4,7 @@ nav_title: Debugging with a coding agent
 description: Reproduce a problem in your running app, use a coding agent to investigate it, and check the fix together.
 ---
 
-Suppose the **Buy** button on your product page moves just as you're about to click it. Tell your coding agent where you started and what you saw: “Open the product list and click the mug. When the stock count appears, the Buy button moves down.” That gives you both a way to reproduce the problem and check the fix.
+To debug a Next.js app with a coding agent, share the route, what you expected to happen, and what happened instead. With the app running, you and your agent can narrow down whether the problem occurs when Next.js renders the route, in the browser, or only during a production build.
 
 ## Start the app
 
@@ -20,11 +20,11 @@ Open the URL printed by `next dev`. If Next.js finds a dev server already runnin
 
 | What you see                                             | How your agent can help                                                                                                                                                                                                                                                                                                                                                                         |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A page won't compile or render                           | With [Next.js DevTools MCP](/docs/app/guides/mcp) connected, your agent can use `nextjs_index` to discover the running server. If it lists `check_route`, the agent can call it through `nextjs_call` with the affected path, such as `/products/mug`, including the query string if relevant.                                                                                                  |
+| A page won't compile or render                           | With [Next.js DevTools MCP](/docs/app/guides/mcp) connected, your agent can use `nextjs_index` to discover the running server. If it lists `check_route`, the agent can call it through `nextjs_call` with the affected path, such as `/settings`, including the query string if relevant.                                                                                                      |
 | A click fails or the DevTools badge shows an issue       | Repeat the click with the browser open. Your agent can read errors from the connected browser with `get_errors` and locate the development log with `get_logs`. The [DevTools guide](https://github.com/vercel/next.js/blob/ecc4775a74f65b1376e8fc571dfc885692f1fabb/docs/01-app/02-guides/devtools.mdx#issues-and-insights) explains the difference between an error and a navigation Insight. |
 | A prerender error appears only during a production build | [`next build --debug-prerender`](/docs/app/guides/building#debug-prerender-errors) gives you readable server frames. In a large app, [`--debug-build-paths`](/docs/app/api-reference/cli/next#building-specific-routes) limits the build to selected routes. Don't deploy the diagnostic build.                                                                                                 |
 
-A route check can tell you why a page failed to render. Look for a source location in `compilationIssues` or `validation.errors`. With Cache Components enabled, `validation.status: "validated"` and no errors mean that render passed. If it says `"not-run"`, read the reason. A redirect to sign-in, for example, means your signed-in product page wasn't checked, even if the tool returned `ok: true`.
+A route check can tell you why a page failed to render. Look for a source location in `compilationIssues` or `validation.errors`. With Cache Components enabled, `validation.status: "validated"` and no errors mean that render passed. If it says `"not-run"`, read the reason. A redirect to sign-in, for example, means the requested page wasn't checked, even if the tool returned `ok: true`.
 
 <details>
 <summary>Call the dev server directly without an MCP client</summary>
@@ -45,17 +45,15 @@ mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 If the list includes `check_route`, send the concrete page path:
 
 ```bash filename="Terminal"
-mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check_route","arguments":{"path":"/products/mug"}}}'
+mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check_route","arguments":{"path":"/settings"}}}'
 ```
 
 </details>
 
 ## Verify the fix
 
-Go back to the product list and click the mug again. Opening the product URL directly skips the click where you saw the problem.
+Repeat the steps that originally failed, using the same URL, session, and development or production mode.
 
-1. **While stock is loading:** Can you already see the product name and tell that stock is still loading? For [instant navigations](/docs/app/guides/instant-navigation#prevent-regressions-with-e2e-tests), your agent can check what's visible _before_ the response arrives with [Playwright's `instant()` helper](/docs/app/guides/testing/playwright#testing-instant-navigations).
-2. **When stock arrives:** Does the count replace the placeholder without moving the Buy button? Try a narrow window too. Your agent can record the button's position at both points in a browser test.
-3. **When you come back:** If your change affects caching, update the stock through the app, navigate away, and return. You should see the new value.
-
-If you'd like your agent to drive the browser, the optional [`next-dev-loop` skill](/docs/app/guides/ai-agents#next-dev-loop) combines browser checks with the dev server's diagnostics. To confirm automatic prefetching in production, repeat the same click against a normal `next build` and `next start`.
+- **For a render error**, check the route again and confirm that validation ran and the original error is gone.
+- **For a browser issue**, repeat the interaction and check the result as well as the console. If the problem happened while a request was pending, check before the response arrives too. The [Instant Navigation guide](/docs/app/guides/instant-navigation#prevent-regressions-with-e2e-tests) shows how to test this with [Playwright's `instant()` helper](/docs/app/guides/testing/playwright#testing-instant-navigations). The optional [`next-dev-loop` skill](/docs/app/guides/ai-agents#next-dev-loop) can help your agent drive the browser and check framework diagnostics together.
+- **For a production-only issue**, run a normal `next build`. If the problem occurs at runtime, use `next start` and reproduce it against that build.
