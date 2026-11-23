@@ -209,7 +209,7 @@ export function installDevValidationWorker(options: InstallOptions): void {
     try {
       activePool = getPool()
     } catch {
-      return { chunks: null, messages: null, localSpans: null }
+      return { chunks: null, errors: null, localSpans: null }
     }
 
     const message: DevValidationWorkerMessage = {
@@ -255,7 +255,7 @@ export function installDevValidationWorker(options: InstallOptions): void {
       // Worker crash or IPC error: tear down so the next validation starts
       // fresh. The main thread treats a missing result as "nothing to deliver."
       await tearDownPool()
-      return { chunks: null, messages: null, localSpans: null }
+      return { chunks: null, errors: null, localSpans: null }
     } finally {
       // `once` only auto-removes the listener if it fired, so remove it
       // explicitly to bound its lifetime to this run when validation completed

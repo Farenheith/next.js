@@ -8,6 +8,7 @@ import type { AdvanceableRenderStage } from './staged-rendering'
 import type { RenderOpts } from './types'
 import type { NonPartial } from '../../shared/lib/typescript-utils'
 import type { LocalSpanBatch } from '../lib/trace/span-store'
+import type { DevValidationError } from './dev-validation-results'
 
 /**
  * Cross-module handoff for the dev validation worker (client-module warmup,
@@ -147,10 +148,10 @@ export type DevValidationWorkerMessage = DevValidationSnapshot &
 export type DevValidationWorkerResult = {
   chunks: Uint8Array[] | null
   /**
-   * The message of every validation error, or null when validation was
-   * superseded or did not run. An empty array means it ran and found nothing.
+   * Every validation error as data, or null when validation was superseded or
+   * did not run. An empty array means it ran and found nothing.
    */
-  messages: string[] | null
+  errors: DevValidationError[] | null
   localSpans: LocalSpanBatch | null
 }
 

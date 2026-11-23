@@ -43,9 +43,13 @@ describe('mcp-server check_route tool', () => {
       validation: { status: 'validated' },
     })
     expect(result.validation.errors).toHaveLength(1)
-    expect(result.validation.errors[0]).toContain(
+    const [error] = result.validation.errors
+    expect(error.message).toContain(
       'Next.js encountered uncached data during prerendering'
     )
+    expect(error.location).toBe('app/blocking/page.tsx:4:19')
+    expect(error.stack).toContain('at Page (app/blocking/page.tsx:4:19)')
+    expect(error.stack).toContain('> 4 |   await connection()')
   })
 
   it('passes a route that streams its request-time data', async () => {
@@ -84,8 +88,11 @@ describe('mcp-server check_route tool', () => {
 
     expect(result.ok).toBe(false)
     expect(result.validation.status).toBe('validated')
-    expect(result.validation.errors[0]).toContain(
+    expect(result.validation.errors[0].message).toContain(
       'Next.js encountered uncached data during prerendering'
+    )
+    expect(result.validation.errors[0].location).toBe(
+      'app/blocking/page.tsx:4:19'
     )
   })
 

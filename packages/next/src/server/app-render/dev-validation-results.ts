@@ -16,11 +16,25 @@ export type DevValidationStatus =
   /** A newer render superseded the validation before it finished. */
   | 'aborted'
 
+export type DevValidationError = {
+  message: string
+  /**
+   * Where the error points in the app's source, as `file:line:column`, or null
+   * when no frame could be mapped back to a source file.
+   */
+  location: string | null
+  /**
+   * The source-mapped stack and code frame, as `next dev` prints them to the
+   * terminal. Null for a non-Error message.
+   */
+  stack: string | null
+}
+
 export type DevValidationResult = {
   /** Pathname and search of the validated request. */
   url: string
   status: DevValidationStatus
-  errors: string[]
+  errors: DevValidationError[]
 }
 
 type Listener = (result: DevValidationResult) => void
@@ -39,24 +53,50 @@ function getListeners(): Set<Listener> {
 export function reportDevValidationResult(
   url: string,
   status: DevValidationStatus,
-  errors: readonly unknown[] = []
+  errors: DevValidationError[] = []
 ): void {
   const listeners = getListeners()
   if (listeners.size === 0) {
     return
   }
-  const result: DevValidationResult = {
-    url,
-    status,
-    errors: errors.map(describeValidationError),
-  }
+  const result: DevValidationResult = { url, status, errors }
   for (const listener of listeners) {
     listener(result)
   }
 }
 
-export function describeValidationError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+/**
+ * Turns a validation error into data. Must run where the error was created:
+ * the source-mapped stack comes from the `inspect` hook that `next dev`
+ * installs on `Error`, which is also what renders it in the terminal.
+ */
+export function describeValidationError(error: unknown): DevValidationError {
+  if (!(error instanceof Error)) {
+    return { message: String(error), location: null, stack: null }
+  }
+
+  const { inspect, stripVTControlCharacters } =
+    require('node:util') as typeof import('node:util')
+  const rendered = stripVTControlCharacters(inspect(error, { colors: false }))
+
+  // The rendering is `<name>: <message>` followed by the frames and the code
+  // frame. Keep only what follows the message.
+  const messageEnd = rendered.indexOf(error.message)
+  const stack = (
+    messageEnd === -1
+      ? rendered
+      : rendered.slice(messageEnd + error.message.length)
+  ).trim()
+
+  // The first frame that names a file with a line and column, with or without
+  // a function name in front of it.
+  const frame = /^\s*at (?:.*? \()?([^()\s]+:\d+:\d+)\)?$/m.exec(stack)
+
+  return {
+    message: error.message,
+    location: frame ? frame[1] : null,
+    stack: stack === '' ? null : stack,
+  }
 }
 
 export function onDevValidationResult(listener: Listener): () => void {

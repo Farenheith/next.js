@@ -392,7 +392,7 @@ export async function runDevValidation(
   }
 
   try {
-    const { chunks, messages } = collector
+    const { chunks, errors } = collector
       ? await runWithLocalSpanSink(collector.record, () =>
           runDevValidationOperation(message, signal)
         )
@@ -400,7 +400,7 @@ export async function runDevValidation(
 
     return {
       chunks,
-      messages,
+      errors,
       // Superseded validation is stale as a whole. Do not import a partial
       // worker trace for a page the user has already left.
       localSpans: signal.aborted ? null : (collector?.finish() ?? null),
@@ -425,7 +425,7 @@ export async function runDevValidation(
 async function runDevValidationOperation(
   message: DevValidationWorkerMessage,
   signal: AbortSignal
-): Promise<Pick<DevValidationWorkerResult, 'chunks' | 'messages'>> {
+): Promise<Pick<DevValidationWorkerResult, 'chunks' | 'errors'>> {
   // Load the native SWC bindings and wire the code-frame renderer so the errors
   // logged below render with a source-mapped code frame, matching the
   // in-process dev output (the E2E tests snapshot the CLI text between the
@@ -465,7 +465,7 @@ async function runDevValidationOperation(
   }
 
   if (signal.aborted) {
-    return { chunks: null, messages: null }
+    return { chunks: null, errors: null }
   }
 
   // Crossing into the app-page bundle: the entire validation runs there, so
@@ -478,15 +478,15 @@ async function runDevValidationOperation(
   )
 
   if (signal.aborted) {
-    return { chunks: null, messages: null }
+    return { chunks: null, errors: null }
   }
 
   // `undefined` without an abort means validation ran and found nothing.
   if (validationErrors === undefined) {
-    return { chunks: null, messages: [] }
+    return { chunks: null, errors: [] }
   }
 
-  const messages = validationErrors.map(describeValidationError)
+  const described = validationErrors.map(describeValidationError)
   const errors: Error[] = []
   for (const validationError of validationErrors) {
     // Log to the worker's stderr; `node-environment` +
@@ -499,11 +499,11 @@ async function runDevValidationOperation(
   }
 
   if (errors.length === 0) {
-    return { chunks: null, messages }
+    return { chunks: null, errors: described }
   }
 
   return {
     chunks: await serializeValidationErrorsToFlight(ComponentMod, errors),
-    messages,
+    errors: described,
   }
 }

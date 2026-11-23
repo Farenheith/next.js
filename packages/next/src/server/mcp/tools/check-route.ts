@@ -18,6 +18,7 @@ import { mcpTelemetryTracker } from '../mcp-telemetry-tracker'
 import type { FormattedIssue } from './utils/format-compilation-issues'
 import {
   onDevValidationResult,
+  type DevValidationError,
   type DevValidationResult,
 } from '../../app-render/dev-validation-results'
 import z from 'next/dist/compiled/zod'
@@ -25,7 +26,7 @@ import z from 'next/dist/compiled/zod'
 const VALIDATION_TIMEOUT_MS = 30_000
 
 type Validation =
-  | { status: 'validated'; errors: string[] }
+  | { status: 'validated'; errors: DevValidationError[] }
   | { status: 'not-run'; reason: string }
 
 export function registerCheckRouteTool(
@@ -46,6 +47,7 @@ export function registerCheckRouteTool(
         'Compiles the route, requests it, and waits for the Cache Components validation of that request. ' +
         'Returns { path, routeSpecifier, httpStatus, compilationIssues, validation, ok }. ' +
         '`validation.errors` holds the blocking-route and instant errors that `next dev` would print for the route, ' +
+        'each as { message, location, stack } where `location` is the `file:line:column` in the app source, ' +
         'such as uncached or request-time data read outside <Suspense>. ' +
         'Use this after editing a route instead of running `next build` to find out whether it can be prerendered. ' +
         'Unlike get_errors it does not need an open browser, and it is not affected by a browser that sends `Cache-Control: no-cache`.',

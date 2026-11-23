@@ -99,7 +99,10 @@ import {
   createWorkStore,
 } from '../async-storage/work-store'
 import { formatValidationEvent } from './dev-validation-events'
-import { reportDevValidationResult } from './dev-validation-results'
+import {
+  describeValidationError,
+  reportDevValidationResult,
+} from './dev-validation-results'
 import { createSnapshot } from './async-local-storage'
 import {
   getDevValidationWorker,
@@ -4963,11 +4966,10 @@ function runDevValidationInBackground(
 
                 reportDevValidationResult(
                   getValidationUrl(ctx),
-                  validationAbortSignal.aborted ||
-                    workerResult.messages === null
+                  validationAbortSignal.aborted || workerResult.errors === null
                     ? 'aborted'
                     : 'validated',
-                  workerResult.messages ?? []
+                  workerResult.errors ?? []
                 )
 
                 // A newer navigation may have superseded this validation while
@@ -5034,7 +5036,7 @@ function runDevValidationInBackground(
                       // `undefined` without an abort means validation ran and
                       // found nothing.
                       validationAbortSignal.aborted ? 'aborted' : 'validated',
-                      validationErrors ?? []
+                      (validationErrors ?? []).map(describeValidationError)
                     )
 
                     if (
@@ -5491,7 +5493,7 @@ async function resolveLazyDevValidationInputs(
 
   if ('syncInterruptReason' in inputs) {
     reportDevValidationResult(getValidationUrl(ctx), 'validated', [
-      inputs.syncInterruptReason,
+      describeValidationError(inputs.syncInterruptReason),
     ])
     await logMessagesAndSendErrorsToBrowser(
       [inputs.syncInterruptReason],
@@ -5511,7 +5513,7 @@ function forwardErrorsFromWarmRender(
 ) {
   if ('syncInterruptReason' in inputs) {
     reportDevValidationResult(getValidationUrl(ctx), 'validated', [
-      inputs.syncInterruptReason,
+      describeValidationError(inputs.syncInterruptReason),
     ])
     void logMessagesAndSendErrorsToBrowser(
       [inputs.syncInterruptReason],
