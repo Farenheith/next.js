@@ -187,7 +187,7 @@ func main() {
 		close(stopped)
 	}()
 
-	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(clientListener{ln}); !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, "switchyard:", err)
 		os.Exit(1)
 	}
@@ -253,6 +253,9 @@ func newServer(handler http.Handler, idleTimeout, headerTimeout, requestTimeout 
 		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
 			upstream := newClientUpstream()
 			upstreams.Store(c, upstream)
+			if conn, ok := c.(*clientConn); ok {
+				ctx = context.WithValue(ctx, clientConnKey{}, conn)
+			}
 			return context.WithValue(ctx, clientUpstreamKey{}, upstream)
 		},
 		ConnState: func(c net.Conn, state http.ConnState) {
@@ -504,7 +507,11 @@ func newProxy(upstream string, public *net.TCPAddr, upstreamIdle time.Duration, 
 			r = r.WithContext(context.WithValue(r.Context(), requestBodyKey{}, body))
 			r.Body = body
 		}
-		r = r.WithContext(context.WithValue(r.Context(), nodeResponseKey{}, &nodeResponse{hopHeaders: nil, connection: nil, connected: atomic.Bool{}}))
+		node := newNodeResponse()
+		r = r.WithContext(context.WithValue(r.Context(), nodeResponseKey{}, node))
+		defer node.done()
+		r, release := endWithClient(r, node)
+		defer release()
 		proxy.ServeHTTP(&clientWriter{ResponseWriter: w, sentInformational: false}, r)
 	})
 }
@@ -610,6 +617,114 @@ type nodeResponse struct {
 	// Whether a connection to Node was made for the request. The Transport
 	// reports it on its own goroutine.
 	connected atomic.Bool
+
+	// For passing on the end of a client's sending (endWithClient), set by
+	// the Transport and Go's server on their own goroutines:
+	endMu sync.Mutex
+	// the connection to Node the request went out on;
+	upstream *keptConn
+	// whether all of the request has reached that connection (sent);
+	sent bool
+	// whether the client has stopped sending;
+	ended bool
+	// and whether Switchyard has stopped sending to Node.
+	endedUpstream bool
+	// whether the Transport has written the request into its buffer, and
+	// whether waitForSent's timer is running;
+	wrote, waiting bool
+	// markSent, as the func the connection to Node calls after its next write
+	// (keptConn.afterWrite).
+	onSent func()
+}
+
+func newNodeResponse() *nodeResponse {
+	n := &nodeResponse{hopHeaders: nil, connection: nil, connected: atomic.Bool{}, endMu: sync.Mutex{}, upstream: nil, sent: false, ended: false, endedUpstream: false, wrote: false, waiting: false, onSent: nil}
+	n.onSent = n.markSent
+	return n
+}
+
+func (n *nodeResponse) gotConn(conn net.Conn) {
+	n.connected.Store(true)
+	kept, ok := conn.(*keptConn)
+	if !ok {
+		return // the shared transport, used only without newServer
+	}
+	n.endMu.Lock()
+	defer n.endMu.Unlock()
+	n.upstream, n.sent, n.wrote = kept, false, false
+}
+
+// wroteRequest runs when the Transport has written the whole request into
+// its write buffer, before it flushes that buffer to the connection. The
+// next write to the connection is that flush: then the request has been
+// sent. If the client has stopped sending and no write follows within a
+// second, the buffer was empty, and the request was already sent
+// (waitForSent).
+func (n *nodeResponse) wroteRequest() {
+	n.endMu.Lock()
+	defer n.endMu.Unlock()
+	if n.upstream == nil {
+		return
+	}
+	n.upstream.afterWrite.Store(&n.onSent)
+	n.wrote = true
+	n.waitForSent()
+}
+
+// waitForSent starts, once, the timer that marks the request sent when no
+// write came after wroteRequest. Only needed once the client has stopped
+// sending, so most requests never start one. Called with endMu held.
+func (n *nodeResponse) waitForSent() {
+	if !n.ended || !n.wrote || n.sent || n.waiting {
+		return
+	}
+	n.waiting = true
+	kept := n.upstream
+	time.AfterFunc(time.Second, func() {
+		if kept.afterWrite.CompareAndSwap(&n.onSent, nil) {
+			n.onSent()
+		}
+	})
+}
+
+// markSent records that the whole request has been sent. Through onSent, it
+// runs once: from the connection's next write or from wroteRequest's timer,
+// whichever takes onSent out of keptConn.afterWrite first.
+func (n *nodeResponse) markSent() {
+	n.endMu.Lock()
+	defer n.endMu.Unlock()
+	n.sent = true
+	n.endUpstream()
+}
+
+// done stops the connection to Node from reporting writes to this request.
+func (n *nodeResponse) done() {
+	n.endMu.Lock()
+	defer n.endMu.Unlock()
+	if n.upstream != nil {
+		n.upstream.afterWrite.CompareAndSwap(&n.onSent, nil)
+	}
+}
+
+func (n *nodeResponse) clientEnded() {
+	n.endMu.Lock()
+	defer n.endMu.Unlock()
+	n.ended = true
+	n.waitForSent()
+	n.endUpstream()
+}
+
+// endUpstream stops sending to Node once the client has stopped and the
+// whole request has been sent, so no part of the request is cut off. Node
+// then handles the end as it would a client's. Called with endMu held.
+func (n *nodeResponse) endUpstream() {
+	if !n.ended || !n.sent || n.upstream == nil || n.endedUpstream {
+		return
+	}
+	n.endedUpstream = true
+	if cw, ok := n.upstream.Conn.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
 }
 
 // nodeResponseTransport keeps, in the request's nodeResponse, the parts of
@@ -630,7 +745,12 @@ func (t nodeResponseTransport) RoundTrip(r *http.Request) (*http.Response, error
 	}
 	// httptrace adds this hook to any the context already has.
 	r = r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) { node.connected.Store(true) },
+		GotConn: func(info httptrace.GotConnInfo) { node.gotConn(info.Conn) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				node.wroteRequest()
+			}
+		},
 	}))
 	res, err := t.next.RoundTrip(r)
 	if err == nil {
@@ -771,12 +891,23 @@ type keptConn struct {
 	kept    *keptUpstreams
 	once    sync.Once
 	slotted atomic.Bool
+	// Called once after the next write, then cleared (see
+	// nodeResponse.wroteRequest).
+	afterWrite atomic.Pointer[func()]
 }
 
 func newKeptConn(conn net.Conn, kept *keptUpstreams) *keptConn {
-	c := &keptConn{Conn: conn, kept: kept, once: sync.Once{}, slotted: atomic.Bool{}}
+	c := &keptConn{Conn: conn, kept: kept, once: sync.Once{}, slotted: atomic.Bool{}, afterWrite: atomic.Pointer[func()]{}}
 	c.slotted.Store(kept.take())
 	return c
+}
+
+func (c *keptConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if after := c.afterWrite.Swap(nil); after != nil {
+		(*after)()
+	}
+	return n, err
 }
 
 func (c *keptConn) release() {
