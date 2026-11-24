@@ -840,7 +840,10 @@ impl Effects {
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(ApplyError::Retry)) => {
-                        stop = true;
+                        // Keep applying the other effects: a retry re-executes the producers of
+                        // every effect that signaled it, so stopping here would only repair one
+                        // batch of them per attempt (e.g. when restoring many outputs that are
+                        // missing on disk), and the attempts are limited.
                         retry_keys
                             .push(String::from_utf8_lossy(&self.captured[idx].key()).into_owned());
                     }

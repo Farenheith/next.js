@@ -236,3 +236,64 @@ async fn restored_write_is_not_verified_by_a_link_to_equal_bytes() -> Result<()>
     assert_eq!(fs::read_to_string(&out)?, "linked");
     Ok(())
 }
+
+/// More outputs than publication applies at once, times its retries.
+const MANY_OUTPUTS: u32 = 5000;
+
+#[turbo_tasks::function]
+async fn write_numbered(fs: ResolvedVc<DiskFileSystem>, n: u32) -> Result<()> {
+    FileSystem::root(*fs)
+        .await?
+        .join(&format!("many/{n}.txt"))?
+        .write(FileContent::Content(File::from(format!("{n}"))).cell())
+        .await?;
+    Ok(())
+}
+
+#[turbo_tasks::function(operation, root)]
+async fn write_many(fs: ResolvedVc<DiskFileSystem>) -> Result<Vc<()>> {
+    for n in 0..MANY_OUTPUTS {
+        write_numbered(*fs, n).as_side_effect().await?;
+    }
+    Ok(Vc::cell(()))
+}
+
+/// Restoring many outputs whose files are gone (e.g. a cache restored without its outputs)
+/// re-executes all of their write tasks, not one batch per publication attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restoring_many_missing_outputs() -> Result<()> {
+    let cache_parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join(".cache");
+    fs::create_dir_all(&cache_parent)?;
+    let cache = tempfile::Builder::new()
+        .prefix("early-write-many-")
+        .tempdir_in(&cache_parent)?;
+    let dir = tempfile::tempdir()?;
+    let path = fs::canonicalize(dir.path())?;
+    let root: RcStr = path.to_str().context("Non-UTF8 path")?.into();
+
+    for session in 0..2 {
+        if session == 1 {
+            fs::remove_dir_all(path.join("many"))?;
+        }
+        let tt = open(cache.path());
+        let root = root.clone();
+        tt.run_once(async move {
+            let fs_vc = disk(root).resolve().strongly_consistent().await?;
+            read_strongly_consistent_and_apply_effects(capture(write_many(fs_vc)), |e| e).await?;
+            anyhow::Ok(())
+        })
+        .await?;
+        tt.stop_and_wait().await;
+    }
+    for n in [0, MANY_OUTPUTS / 2, MANY_OUTPUTS - 1] {
+        assert_eq!(
+            fs::read_to_string(path.join(format!("many/{n}.txt")))?,
+            n.to_string()
+        );
+    }
+    assert_eq!(
+        fs::read_dir(path.join("many"))?.count(),
+        MANY_OUTPUTS as usize
+    );
+    Ok(())
+}
