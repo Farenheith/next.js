@@ -532,28 +532,37 @@ describe('native-route-go', () => {
       const path = 'app/(group)/native/[id]/route.ts'
       const goPath = 'app/(group)/native/[id]/route.go'
       const goSource = await next.readFile(goPath)
-      const outputStart = next.cliOutput.length
-      try {
-        await next.patchFile(
-          path,
-          'export function GET() { return new Response("conflict") }'
-        )
-        // Recreate route.go so filesystems that list entries in creation order
-        // list it after route.ts. The result must not depend on that order.
-        await next.deleteFile(goPath)
-        await next.patchFile(goPath, goSource)
-        await retry(async () => {
-          expect((await next.fetch('/native/example')).status).toBe(500)
-          expect(next.cliOutput.slice(outputStart)).toContain(
-            'Conflicting App Router handlers'
+      // Compile the route first so it has a change subscription.
+      expect((await data()).id).toBe('example')
+      // The second round checks that an error that was fixed is printed again
+      // when it comes back.
+      for (let round = 0; round < 2; round++) {
+        const outputStart = next.cliOutput.length
+        try {
+          await next.patchFile(
+            path,
+            'export function GET() { return new Response("conflict") }'
           )
+          // Recreate route.go so filesystems that list entries in creation order
+          // list it after route.ts. The result must not depend on that order.
+          await next.deleteFile(goPath)
+          await next.patchFile(goPath, goSource)
+          // The route's change subscription stores the issue and prints it
+          // before any request. A request that then fails on the stored issue
+          // doesn't print it, so this is what makes the error visible.
+          await retry(async () => {
+            expect(next.cliOutput.slice(outputStart)).toContain(
+              'Conflicting App Router handlers'
+            )
+          }, 30_000)
+          expect((await next.fetch('/native/example')).status).toBe(500)
+        } finally {
+          await next.deleteFile(path)
+        }
+        await retry(async () => {
+          expect((await data()).id).toBe('example')
         }, 30_000)
-      } finally {
-        await next.deleteFile(path)
       }
-      await retry(async () => {
-        expect((await data()).id).toBe('example')
-      }, 30_000)
     })
     it('reports the disabled Go experiment from Rust and recovers when enabled', async () => {
       const config = await next.readFile('next.config.ts')
