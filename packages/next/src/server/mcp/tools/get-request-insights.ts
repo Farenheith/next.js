@@ -2,10 +2,7 @@ import type { McpServer } from 'next/dist/compiled/@modelcontextprotocol/sdk/ser
 import z from 'next/dist/compiled/zod'
 import { isRequestInsightFor } from '../../../shared/lib/request-insights'
 import { summarizeRequestInsight } from '../../../shared/lib/request-insights-summary'
-import {
-  getRequestInsightsSnapshot,
-  isRequestInsightsEnabled,
-} from '../../lib/trace/request-insights'
+import { getRequestInsightsSnapshot } from '../../lib/trace/request-insights'
 import { mcpTelemetryTracker } from '../mcp-telemetry-tracker'
 
 const DEFAULT_REQUEST_LIMIT = 20
@@ -17,7 +14,7 @@ export function registerGetRequestInsightsTool(server: McpServer) {
     'get_request_insights',
     {
       description:
-        'List recent Request Insights or inspect a request by ID, using the in-memory request window. Useful for debugging slow renders, server fetches, cache behavior, and request timelines without an external OTEL collector. Requires experimental.requestInsights.',
+        'List recent Request Insights or inspect a retained request by ID. Useful for debugging slow renders, server fetches, cache behavior, and request timelines without an external OTEL collector.',
       inputSchema: {
         requestId: z.string().optional(),
         htmlRequestId: z.string().optional(),
@@ -25,20 +22,6 @@ export function registerGetRequestInsightsTool(server: McpServer) {
     },
     async (request) => {
       mcpTelemetryTracker.recordToolCall('mcp/get_request_insights')
-
-      if (!isRequestInsightsEnabled()) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                error:
-                  'Request Insights is not enabled. Set experimental.requestInsights = true in next.config.js and restart next dev.',
-              }),
-            },
-          ],
-        }
-      }
 
       const snapshot = getRequestInsightsSnapshot()
       const memoryRequests = snapshot.requests.filter((insight) => {
