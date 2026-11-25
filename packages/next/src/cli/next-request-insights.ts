@@ -51,11 +51,12 @@ export async function listRequestInsights(
     ? snapshot.requests.filter((request) => matchesRoute(request, route))
     : snapshot.requests
   const byStart = options.sort === 'start'
+  // Both orders keep the most recent requests; `start` lays them out in
+  // timeline order so overlapping work reads top to bottom.
+  const recentRequests = requests.slice(-options.limit)
   const visibleRequests = byStart
-    ? [...requests]
-        .sort((first, second) => first.startTime - second.startTime)
-        .slice(0, options.limit)
-    : requests.slice(-options.limit).reverse()
+    ? recentRequests.sort((first, second) => first.startTime - second.startTime)
+    : recentRequests.reverse()
 
   if (options.json) {
     console.log(
@@ -78,7 +79,7 @@ export async function listRequestInsights(
   }
 
   console.log(
-    `Showing ${visibleRequests.length} of ${requests.length} ${route ? 'matching' : 'retained'} requests (${byStart ? 'by start time' : 'newest first'}).`
+    `Showing ${visibleRequests.length} of ${requests.length} ${route ? 'matching' : 'retained'} requests (${byStart ? 'most recent, by start time' : 'newest first'}).`
   )
   const firstStart = Math.min(
     ...snapshot.requests.map((request) => request.startTime)
@@ -317,23 +318,22 @@ function findRequest(
   id: string,
   kind?: RequestInsightKind
 ): RequestInsight {
-  const candidates = kind
-    ? requests.filter((request) => getRequestInsightKind(request) === kind)
-    : requests
-  const requestId = resolveRequestId(candidates, id)
-  const related = candidates.filter((request) =>
+  const requestId = resolveRequestId(requests, id)
+  const related = requests.filter((request) =>
     isRequestInsightFor(request, requestId)
   )
   // `get` shows one entry; the request wins over its Instant Insights entry
   // unless --kind asks for the latter.
-  return (
-    related.find((request) => getRequestInsightKind(request) === 'request') ??
-    related[0]
-  )
+  const match = kind
+    ? related.find((request) => getRequestInsightKind(request) === kind)
+    : (related.find(
+        (request) => getRequestInsightKind(request) === 'request'
+      ) ?? related[0])
+  return match ?? printAndExit(`No retained ${kind} entry matches "${id}".`)
 }
 
-function resolveRequestId(candidates: RequestInsight[], id: string): string {
-  const requestIds = candidates.map((request) => request.requestId)
+function resolveRequestId(requests: RequestInsight[], id: string): string {
+  const requestIds = requests.map((request) => request.requestId)
   if (requestIds.includes(id)) return id
   const matches = new Set(
     requestIds.filter((requestId) => requestId.startsWith(id))
@@ -343,7 +343,7 @@ function resolveRequestId(candidates: RequestInsight[], id: string): string {
   }
   if (matches.size > 1) {
     return printAndExit(
-      `Request ID prefix "${id}" is ambiguous (${matches.size} matches).\nCandidates:\n${candidates
+      `Request ID prefix "${id}" is ambiguous (${matches.size} matches).\nCandidates:\n${requests
         .filter((request) => matches.has(request.requestId))
         .map(
           (request) =>

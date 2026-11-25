@@ -154,11 +154,14 @@ export function getRequestInsightKey(insight: RequestInsightIdentity): string {
 
 /**
  * Whether `insight` describes the request with `requestId`: the request itself
- * or an Instant Insights entry for it, which shares its request ID.
+ * or an Instant Insights entry for it. Instant Insights entries point at the
+ * request they validated; older ones share its request ID instead.
  */
 export function isRequestInsightFor(
-  insight: Pick<RequestInsightIdentity, 'requestId'>,
+  insight: Pick<RequestInsightIdentity, 'requestId' | 'parentRequestId'>,
   requestId: string
 ): boolean {
-  return insight.requestId === requestId
+  return (
+    insight.requestId === requestId || insight.parentRequestId === requestId
+  )
 }
