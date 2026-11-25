@@ -33,6 +33,11 @@ pub struct Invalidator {
 }
 
 impl Invalidator {
+    #[cfg(test)]
+    pub(crate) fn for_testing(task: TaskId) -> Self {
+        Self { task }
+    }
+
     /// The id of the task this invalidator invalidates.
     pub fn task_id(&self) -> TaskId {
         self.task
