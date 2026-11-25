@@ -524,6 +524,54 @@ describe('local span recording', () => {
     expect(getSpanRecords({ name: BaseServerSpan.render })).toHaveLength(1)
   })
 
+  it("keeps the OTel request span as the root under the router's local span", () => {
+    process.env.__NEXT_REQUEST_INSIGHTS = 'true'
+    context.setGlobalContextManager(new TestContextManager())
+    const delegateSpan = Object.assign(
+      trace.wrapSpanContext({
+        traceId: '0123456789abcdef0123456789abcdef',
+        spanId: '0123456789abcdef',
+        traceFlags: 1,
+      }),
+      { isRecording: () => true }
+    )
+    const startSpan = jest.fn((_name: string) => delegateSpan)
+    trace.setGlobalTracerProvider({
+      getTracer() {
+        return { startSpan, startActiveSpan: jest.fn() }
+      },
+    })
+
+    // The router records `route to render` around the render handler as a
+    // local-only span, as router-server.ts does in dev.
+    const rootAttributes = traceLocalSpan(
+      {
+        name: 'route to render',
+        isolateOpenTelemetry: false,
+        synchronous: true,
+      },
+      () =>
+        getTracer().trace(BaseServerSpan.handleRequest, () => {
+          getTracer().setRootSpanAttribute('next.route', '/page')
+          return getTracer().getRootSpanAttributes()
+        })
+    )
+
+    // Only the request span is exported.
+    expect(startSpan.mock.calls.map(([name]) => name)).toEqual([
+      BaseServerSpan.handleRequest,
+    ])
+    expect(rootAttributes?.get('next.span_type')).toBe(
+      BaseServerSpan.handleRequest
+    )
+    expect(rootAttributes?.get('next.route')).toBe('/page')
+    const [routerSpan] = getSpanRecords({ name: 'route to render' })
+    const [requestSpan] = getSpanRecords({
+      name: BaseServerSpan.handleRequest,
+    })
+    expect(requestSpan?.parentSpanId).toBe(routerSpan?.spanId)
+  })
+
   it('does not record or export hidden spans', () => {
     process.env.__NEXT_DEV_SERVER = 'true'
     let receivedSpan: unknown = 'not-called'

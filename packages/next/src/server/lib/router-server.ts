@@ -87,7 +87,7 @@ import {
   runWithRequestInsightsIdentity,
 } from './trace/request-insights-identity'
 import { waitForResponseToFinish } from '../app-render/wait-for-response'
-import { getTracer } from './trace/tracer'
+import { traceLocalSpan } from './trace/local-span-recorder'
 import { RouterSpan } from './trace/constants'
 const debug = setupDebug('next:router-server:main')
 const isNextFont = (pathname: string | null) =>
@@ -568,9 +568,12 @@ export async function initialize(opts: {
         }
       }
 
-      // Only Request Insights in dev records the router-to-render handoff, so
-      // `next start` traces keep their existing root span. The request is
-      // already inside its identity scope, so the span gets its request ID.
+      // Only Request Insights in dev records the router-to-render handoff. The
+      // request is already inside its identity scope, so the span gets its
+      // request ID. The span is local-only and doesn't go through the tracer,
+      // so it's never exported to OpenTelemetry and never becomes the root
+      // span: `BaseServer.handleRequest` stays the root, and keeps the
+      // `http.route` it reads from the root span attributes.
       const recordRenderHandoff =
         opts.dev && getRequestMeta(req, 'requestInsightsIdentity') !== undefined
 
@@ -578,11 +581,16 @@ export async function initialize(opts: {
         if (!recordRenderHandoff) {
           return await render()
         }
-        return await getTracer().trace(
-          RouterSpan.invokeRender,
+        return await traceLocalSpan(
           {
-            spanName: 'route to render',
-            attributes: { 'next.route': invokePath },
+            name: 'route to render',
+            isolateOpenTelemetry: false,
+            attributes: {
+              'next.span_category': 'nextjs',
+              'next.span_name': 'route to render',
+              'next.span_type': RouterSpan.invokeRender,
+              'next.route': invokePath,
+            },
           },
           render
         )
