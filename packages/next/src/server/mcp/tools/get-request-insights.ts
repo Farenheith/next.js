@@ -2,7 +2,10 @@ import type { McpServer } from 'next/dist/compiled/@modelcontextprotocol/sdk/ser
 import z from 'next/dist/compiled/zod'
 import { isRequestInsightFor } from '../../../shared/lib/request-insights'
 import { summarizeRequestInsight } from '../../../shared/lib/request-insights-summary'
-import { getRequestInsightsSnapshot } from '../../lib/trace/request-insights'
+import {
+  getRequestInsightsSnapshot,
+  isRequestInsightsEnabled,
+} from '../../lib/trace/request-insights'
 import { mcpTelemetryTracker } from '../mcp-telemetry-tracker'
 
 const DEFAULT_REQUEST_LIMIT = 20
@@ -22,6 +25,20 @@ export function registerGetRequestInsightsTool(server: McpServer) {
     },
     async (request) => {
       mcpTelemetryTracker.recordToolCall('mcp/get_request_insights')
+
+      if (!isRequestInsightsEnabled()) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error:
+                  'Request Insights is not enabled. Set experimental.requestInsights = true in next.config.js and restart next dev.',
+              }),
+            },
+          ],
+        }
+      }
 
       const snapshot = getRequestInsightsSnapshot()
       const memoryRequests = snapshot.requests.filter((insight) => {
