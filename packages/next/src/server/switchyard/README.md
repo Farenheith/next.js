@@ -6,7 +6,7 @@ Switchyard is an experimental Go server in front of `next start`, enabled with `
 
 Switchyard aims to behave the way `next start` does without it: what a client receives and what the app's code sees should be the same. Matching is pragmatic. Each difference that remains is listed below, so a difference is a decision, not an accident.
 
-Code that exists only to copy what Node does is marked with a `Node parity:` comment saying which behavior it copies, so it's easy to find and to remove later.
+Code that exists only to copy what Node does is marked with a `Node parity:` comment saying which behavior it copies, so it can be found and removed later.
 
 ## Differences from `next start`
 
@@ -38,10 +38,10 @@ What a client or the app sees differently with Switchyard on. Some are pinned by
 
 ### Malformed and unusual requests
 
-Go's HTTP parser accepts and rejects different requests than Node's:
+Go's HTTP parser accepts and refuses different requests than Node's:
 
 - **Go accepts, Node answers `400`:** bare-LF line endings, folded header lines, `Content-Length` together with `Transfer-Encoding: chunked`, a repeated identical `Content-Length`, `HTTP/1.2`.
-- **Go rejects, Node accepts:** a repeated `Host` (`400`), `Transfer-Encoding: gzip, chunked` (`501`), an `HTTP/2.0` request line (`505`), HTTP/0.9 (`400`).
+- **Go refuses, Node accepts:** a repeated `Host` (`400`), `Transfer-Encoding: gzip, chunked` (`501`), an `HTTP/2.0` request line (`505`), HTTP/0.9 (`400`).
 - **Go's own error answers** have a plain-text body and can carry detail in the reason phrase (`400 Bad Request: missing required Host header`). Node's are empty with `Connection: close`.
 - **Methods Node doesn't know** (`FOO`, lowercase `get`) get Node's `400`, but the connection stays open. `CONNECT` gets `502`; Node closes the connection.
 - **`Expect` values other than `100-continue`** get Go's `417`, which closes the connection.
