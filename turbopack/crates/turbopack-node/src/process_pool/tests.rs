@@ -337,6 +337,22 @@ async fn wait_for_process_exit(pid: u32) {
     }
 }
 
+/// Waits until nothing references the pool's idle queue anymore.
+///
+/// The task that stops idle processes briefly holds a strong reference to the queue while it checks
+/// it, so the queue can outlive the last pool reference by a moment.
+#[cfg(target_os = "linux")]
+async fn wait_for_queue_dropped(handle: &PoolTestHandle) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while handle.is_queue_alive() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the idle queue is still referenced"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// Runs one operation and returns the PID of the process that served it. The process is idle
 /// afterwards.
 #[cfg(target_os = "linux")]
@@ -390,7 +406,7 @@ async fn test_pool_drop_kills_idle_processes() {
 
         drop(pool);
 
-        assert!(!handle.is_queue_alive());
+        wait_for_queue_dropped(&handle).await;
         wait_for_process_exit(pid).await;
     })
     .await;
@@ -429,7 +445,7 @@ async fn test_pool_drop_with_inflight_operation() {
         assert!(is_process_running(pid2));
 
         drop(op2);
-        assert!(!handle.is_queue_alive());
+        wait_for_queue_dropped(&handle).await;
         wait_for_process_exit(pid2).await;
     })
     .await;
@@ -479,7 +495,7 @@ async fn test_pool_drop_does_not_affect_other_pool() {
         drop(pool_a);
         wait_for_process_exit(pid_a).await;
 
-        assert!(!handle_a.is_queue_alive());
+        wait_for_queue_dropped(&handle_a).await;
         assert!(is_process_running(pid_b));
         assert_eq!(handle_b.idle_count(), 1);
         assert_eq!(
@@ -623,8 +639,9 @@ async fn test_pool_idle_timeout_does_not_keep_pool_alive() {
 
         let pid = run_operation(&pool).await;
         drop(pool);
-        // Only the pool referenced the queue: the task that stops idle processes doesn't.
-        assert!(!handle.is_queue_alive());
+        // Only the pool held on to the queue: the task that stops idle processes doesn't keep it
+        // alive.
+        wait_for_queue_dropped(&handle).await;
         wait_for_process_exit(pid).await;
     })
     .await;
