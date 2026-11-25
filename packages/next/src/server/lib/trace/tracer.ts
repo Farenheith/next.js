@@ -217,6 +217,8 @@ const rootSpanAttributesStore = new Map<
   Map<AttributeNames, AttributeValue | undefined>
 >()
 const rootSpanIdKey = api.createContextKey('next.rootSpanId')
+/** Root spans that are only recorded locally (Request Insights). */
+const localOnlyRootSpanIds = new Set<number>()
 let lastSpanId = 0
 const getSpanId = () => lastSpanId++
 
@@ -423,9 +425,18 @@ class NextTracerImpl implements NextTracer {
     // from outside of nextjs to ensure that we can provide the same level
     // of telemetry when using a custom server
     const existingRootSpanId = spanContext.getValue(rootSpanIdKey)
+    const hasRootSpan =
+      typeof existingRootSpanId === 'number' &&
+      rootSpanAttributesStore.has(existingRootSpanId)
+    const isLocalOnlySpan = !(tracingEnabled && shouldDelegateSpan)
+    // A local-only root, such as `NextServer.getRequestHandler`, which wraps
+    // every request but isn't exported, doesn't stop the first exported span
+    // under it from becoming the root. That keeps `BaseServer.handleRequest`
+    // the root of the exported trace, as it is without Request Insights.
     const isRootSpan =
-      typeof existingRootSpanId !== 'number' ||
-      !rootSpanAttributesStore.has(existingRootSpanId)
+      !hasRootSpan ||
+      (!isLocalOnlySpan &&
+        localOnlyRootSpanIds.has(existingRootSpanId as number))
 
     const spanId = getSpanId()
 
@@ -436,7 +447,6 @@ class NextTracerImpl implements NextTracer {
     // that sets `next.route`, and the OpenTelemetry `handleRequest` span loses
     // its `http.route`. A local-only span that is itself a root still becomes
     // one, so local-only traces keep their root attributes.
-    const isLocalOnlySpan = !(tracingEnabled && shouldDelegateSpan)
     const rootSpanContext =
       isRootSpan || !isLocalOnlySpan
         ? spanContext.setValue(rootSpanIdKey, spanId)
@@ -476,6 +486,7 @@ class NextTracerImpl implements NextTracer {
             if (cleanedUp) return
             cleanedUp = true
             rootSpanAttributesStore.delete(spanId)
+            localOnlyRootSpanIds.delete(spanId)
             if (startTime) {
               performance.measure(
                 `${NEXT_OTEL_PERFORMANCE_PREFIX}:next-${(
@@ -493,6 +504,7 @@ class NextTracerImpl implements NextTracer {
           }
 
           if (isRootSpan) {
+            if (isLocalOnlySpan) localOnlyRootSpanIds.add(spanId)
             rootSpanAttributesStore.set(
               spanId,
               new Map(

@@ -42,6 +42,7 @@ import {
   InstrumentationSpan,
   LoadComponentsSpan,
   NextNodeServerSpan,
+  NextServerSpan,
   NodeSpan,
   RouteModuleSpan,
 } from './constants'
@@ -570,6 +571,58 @@ describe('local span recording', () => {
       name: BaseServerSpan.handleRequest,
     })
     expect(requestSpan?.parentSpanId).toBe(routerSpan?.spanId)
+  })
+
+  it('keeps the OTel request span as the root under NextServer.getRequestHandler', () => {
+    process.env.__NEXT_REQUEST_INSIGHTS = 'true'
+    context.setGlobalContextManager(new TestContextManager())
+    const delegateSpan = Object.assign(
+      trace.wrapSpanContext({
+        traceId: '0123456789abcdef0123456789abcdef',
+        spanId: '0123456789abcdef',
+        traceFlags: 1,
+      }),
+      { isRecording: () => true }
+    )
+    const startSpan = jest.fn((_name: string) => delegateSpan)
+    trace.setGlobalTracerProvider({
+      getTracer() {
+        return { startSpan, startActiveSpan: jest.fn() }
+      },
+    })
+
+    // Every dev request goes through `NextServer.getRequestHandler` (next.ts),
+    // which isn't exported to OTel but is recorded locally, and then the
+    // router's local-only `route to render` span.
+    const rootAttributes = getTracer().trace(
+      NextServerSpan.getRequestHandler,
+      () =>
+        traceLocalSpan(
+          {
+            name: 'route to render',
+            isolateOpenTelemetry: false,
+            synchronous: true,
+          },
+          () =>
+            getTracer().trace(BaseServerSpan.handleRequest, () => {
+              getTracer().trace(BaseServerSpan.render, () =>
+                getTracer().setRootSpanAttribute('next.route', '/page')
+              )
+              return getTracer().getRootSpanAttributes()
+            })
+        )
+    )
+
+    expect(startSpan.mock.calls.map(([name]) => name)).toEqual([
+      BaseServerSpan.handleRequest,
+    ])
+    expect(rootAttributes?.get('next.span_type')).toBe(
+      BaseServerSpan.handleRequest
+    )
+    expect(rootAttributes?.get('next.route')).toBe('/page')
+    expect(
+      getSpanRecords({ name: NextServerSpan.getRequestHandler })
+    ).toHaveLength(1)
   })
 
   it('does not record or export hidden spans', () => {
