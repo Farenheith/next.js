@@ -1163,14 +1163,6 @@ function Trace({
                           <span className="request-insights-span-title">
                             {item.label}
                           </span>
-                          {item.attributeLabel ? (
-                            <span
-                              className="request-insights-span-attribute-label"
-                              title={item.attributeLabel}
-                            >
-                              {item.attributeLabel}
-                            </span>
-                          ) : null}
                         </span>
                       </span>
                       <span className="request-insights-span-track">
@@ -1300,11 +1292,7 @@ function formatSpanAttributeValue(
 }
 
 function getTraceCategoryLabel(category: TraceItem['category']): string {
-  return category === 'nextjs'
-    ? 'Next.js'
-    : category === 'opentelemetry'
-      ? 'OpenTelemetry'
-      : 'Application'
+  return category === 'nextjs' ? 'Next.js' : 'Application'
 }
 
 function TraceSpanContextMenu({

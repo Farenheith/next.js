@@ -19,7 +19,6 @@ export type RequestInsightFilter =
   | 'representation:unknown'
   | 'activity:proxy'
   | 'activity:instant-insights'
-  | 'activity:opentelemetry'
   | 'status:error'
   | 'status:http-4xx'
   | 'status:http-5xx'
@@ -41,7 +40,6 @@ export const REQUEST_INSIGHT_FILTERS: readonly RequestInsightFilter[] = [
   'representation:unknown',
   'activity:proxy',
   'activity:instant-insights',
-  'activity:opentelemetry',
   'status:error',
   'status:http-4xx',
   'status:http-5xx',
@@ -63,7 +61,6 @@ export type RequestInsightSummary = Omit<
   isRsc?: boolean
   hasError: boolean
   hasProxyActivity: boolean
-  hasOpenTelemetryActivity: boolean
   cacheStatuses: Array<'hit' | 'miss' | 'skip'>
 }
 
@@ -97,7 +94,6 @@ export function summarizeRequestInsight(
         )
       ),
     ],
-    hasOpenTelemetryActivity: hasRequestInsightOpenTelemetryActivity(request),
   }
 }
 
@@ -160,14 +156,6 @@ export function hasRequestInsightProxyActivity(
   )
 }
 
-export function hasRequestInsightOpenTelemetryActivity(
-  request: RequestInsight
-): boolean {
-  return request.spans.some(
-    (span) => span.attributes?.['next.span_category'] === 'opentelemetry'
-  )
-}
-
 function getRequestInsightCacheStatuses(request: RequestInsight): string[] {
   return request.fetches.flatMap((fetch) =>
     fetch.cacheStatus ? [fetch.cacheStatus] : []
@@ -219,9 +207,6 @@ export function getRequestInsightTags(
   }
   if (getRequestInsightKind(request) === 'instant-insights') {
     tags.add('activity:instant-insights')
-  }
-  if (hasRequestInsightOpenTelemetryActivity(request)) {
-    tags.add('activity:opentelemetry')
   }
 
   if (hasRequestInsightError(request)) {
