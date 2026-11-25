@@ -357,7 +357,7 @@ function resolveRequestId(candidates: RequestInsight[], id: string): string {
 
 async function discoverDevServerUrl(directory?: string): Promise<URL> {
   const projectDir = getProjectDir(directory)
-  const defaultLockfilePath = path.join(projectDir, '.next', 'lock')
+  const defaultLockfilePath = path.join(projectDir, '.next', 'dev', 'lock')
   const defaultServerUrl = readDevServerUrl(defaultLockfilePath)
   if (defaultServerUrl) return defaultServerUrl
 
