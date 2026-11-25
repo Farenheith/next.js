@@ -167,6 +167,7 @@ describe('request insights', () => {
 
     const json = await next.runCommand([
       'experimental-request-insights',
+      'list',
       '--json',
     ])
     expect(json.code).toBe(0)
