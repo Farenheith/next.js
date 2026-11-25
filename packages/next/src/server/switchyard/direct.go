@@ -4,7 +4,7 @@ import (
 	"maps"
 	"net/http"
 	"net/textproto"
-	"strings"
+	"slices"
 	"sync/atomic"
 
 	"github.com/vercel/next.js/packages/next/src/server/switchyard/routing"
@@ -29,34 +29,11 @@ type directState struct {
 	workers map[string]*goUpstream
 }
 
-// goUpstream is one route.go worker serving one route. A production build's
-// worker serves every route and selects one from x-matched-path.
+// goUpstream is one route.go worker.
 type goUpstream struct {
 	address     string
 	tokenHeader string
 	token       []string // as a header value, set as is on each request
-	route       []string // the route ID as the x-matched-path value
-}
-
-// matchedPathHeader names the route a worker serves, as the Next.js server
-// reads it from Vercel's routing.
-const matchedPathHeader = "X-Matched-Path"
-
-// setWorkerHeaders prepares the headers of a request forwarded to up. The
-// worker selects its handler from x-matched-path and trusts it once the token
-// matches, so every copy the client sent, in any letter case, and every
-// x-next-internal-* header is removed before the worker's own values are set.
-func (up *goUpstream) setWorkerHeaders(h http.Header) {
-	for name := range h {
-		lower := strings.ToLower(name)
-		if lower == "x-matched-path" || strings.HasPrefix(lower, "x-next-internal-") {
-			delete(h, name)
-		}
-	}
-	h[up.tokenHeader] = up.token
-	if up.route != nil {
-		h[matchedPathHeader] = up.route
-	}
 }
 
 func newSwitchyard(node http.Handler) *switchyard {
@@ -79,6 +56,10 @@ func (f *switchyard) apply(msg controlMessage) {
 			return
 		}
 	case "worker":
+		if msg.Page == "" || msg.Address == "" || msg.TokenHeader == "" || msg.Token == "" {
+			proxyErrorLog.Printf("incomplete worker message for page %q", msg.Page)
+			return
+		}
 		next.workers = maps.Clone(next.workers)
 		next.workers[msg.Page] = &goUpstream{
 			address: msg.Address,
@@ -86,12 +67,20 @@ func (f *switchyard) apply(msg controlMessage) {
 			// request.
 			tokenHeader: textproto.CanonicalMIMEHeaderKey(msg.TokenHeader),
 			token:       []string{msg.Token},
-			route:       routeValue(msg.Route),
 		}
 	case "gone":
+		if msg.Token == "" {
+			proxyErrorLog.Printf("gone message without a token for %s", msg.Address)
+			return
+		}
 		next.workers = maps.Clone(next.workers)
+		// Each worker has its own token. Matching on it, not the address,
+		// keeps a late message for an exited worker from removing a new
+		// worker that got the same port.
 		for route, up := range next.workers {
-			if up.address == msg.Address {
+			// slices.Contains, not up.token[0], so an entry without a
+			// token can't panic the control loop.
+			if slices.Contains(up.token, msg.Token) {
 				delete(next.workers, route)
 			}
 		}
@@ -100,15 +89,6 @@ func (f *switchyard) apply(msg controlMessage) {
 		return
 	}
 	f.state.Store(&next)
-}
-
-// routeValue is the x-matched-path value for a worker's route ID, sent as its
-// UTF-8 bytes. Development workers serve one route and have none.
-func routeValue(route string) []string {
-	if route == "" {
-		return nil
-	}
-	return []string{route}
 }
 
 // loadTable reads the route table.
