@@ -20,6 +20,7 @@ export type RequestInsightFilter =
   | 'activity:proxy'
   | 'activity:instant-insights'
   | 'activity:opentelemetry'
+  | 'activity:background'
   | 'status:error'
   | 'status:http-4xx'
   | 'status:http-5xx'
@@ -42,6 +43,7 @@ export const REQUEST_INSIGHT_FILTERS: readonly RequestInsightFilter[] = [
   'activity:proxy',
   'activity:instant-insights',
   'activity:opentelemetry',
+  'activity:background',
   'status:error',
   'status:http-4xx',
   'status:http-5xx',
@@ -198,6 +200,7 @@ export function getRequestInsightTags(
       break
     case 'proxy':
     case 'instant-insights':
+    case 'background':
       break
   }
 
@@ -222,6 +225,9 @@ export function getRequestInsightTags(
   }
   if (hasRequestInsightOpenTelemetryActivity(request)) {
     tags.add('activity:opentelemetry')
+  }
+  if (getRequestInsightKind(request) === 'background') {
+    tags.add('activity:background')
   }
 
   if (hasRequestInsightError(request)) {
