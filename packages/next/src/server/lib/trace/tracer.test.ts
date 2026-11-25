@@ -740,6 +740,91 @@ describe('local span recording', () => {
     )
   })
 
+  it('exports nested spans under the delegate of a non-isolated local span', async () => {
+    process.env.__NEXT_DEV_SERVER = 'true'
+    context.disable()
+    context.setGlobalContextManager(new TestContextManager())
+
+    const validateSpan = Object.assign(
+      trace.wrapSpanContext({
+        traceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        spanId: 'aaaaaaaaaaaaaaaa',
+        traceFlags: 1,
+      }),
+      { isRecording: () => true }
+    )
+    const childSpan = trace.wrapSpanContext({
+      traceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      spanId: 'bbbbbbbbbbbbbbbb',
+      traceFlags: 1,
+    })
+    const exportedParents: Array<[string, string | undefined]> = []
+    const startSpan = (name: string, _options: unknown, ctx?: Context) => {
+      exportedParents.push([
+        name,
+        trace.getSpanContext(ctx ?? context.active())?.spanId,
+      ])
+      return childSpan
+    }
+    trace.setGlobalTracerProvider({
+      getTracer() {
+        return {
+          startSpan,
+          startActiveSpan(...args: unknown[]) {
+            startSpan(args[0] as string, undefined)
+            const callback = args.at(-1) as (span: typeof childSpan) => unknown
+            return context.with(
+              trace.setSpan(context.active(), childSpan),
+              () => callback(childSpan)
+            )
+          },
+        }
+      },
+    })
+
+    await traceLocalSpan(
+      {
+        name: 'Instant Insights',
+        parentSpan: null,
+        delegateSpan: validateSpan,
+        isolateOpenTelemetry: false,
+      },
+      () =>
+        traceLocalSpan(
+          { name: 'Prepare validation inputs', isolateOpenTelemetry: false },
+          async () => {
+            getTracer().trace(
+              NextNodeServerSpan.createComponentTree,
+              () => undefined
+            )
+            // Not on the allowlist: recorded locally, not exported.
+            getTracer().trace(BaseServerSpan.render, () => undefined)
+          }
+        )
+    )
+
+    expect(exportedParents).toEqual([
+      [NextNodeServerSpan.createComponentTree, 'aaaaaaaaaaaaaaaa'],
+    ])
+
+    const rootRecord = getSpanRecords({ name: 'Instant Insights' })[0]
+    const childRecord = getSpanRecords({
+      name: 'Prepare validation inputs',
+    })[0]
+    const nestedNextRecord = getSpanRecords({
+      name: NextNodeServerSpan.createComponentTree,
+    })[0]
+    expect(rootRecord).toEqual(
+      expect.objectContaining({
+        traceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        spanId: 'aaaaaaaaaaaaaaaa',
+        parentSpanId: undefined,
+      })
+    )
+    expect(childRecord.parentSpanId).toBe(rootRecord.spanId)
+    expect(nestedNextRecord.parentSpanId).toBe(childRecord.spanId)
+  })
+
   it.each(['implicit', 'explicit', 'newer public'])(
     'preserves public context and local parenting with an %s parent',
     (mode) => {

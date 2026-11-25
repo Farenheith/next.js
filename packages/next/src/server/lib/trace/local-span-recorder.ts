@@ -158,7 +158,10 @@ type TraceLocalSpanOptions = Omit<RequestSpanOptions, 'parent'> & {
   parentSpan?: Span | null
 }
 
-// Validation operations deliberately isolate local context from the app SDK.
+// Validation operations deliberately isolate local context from the app SDK
+// by default. Pass `isolateOpenTelemetry: false` to keep nested Next.js spans
+// exported to OpenTelemetry: the span's delegate (if any) becomes the active
+// OpenTelemetry span, and nested spans still nest under this local span.
 // Only request callbacks inherit an active request parent and establish scope.
 export function traceLocalSpan<T>(
   options: TraceLocalSpanOptions & { synchronous: true },
@@ -174,12 +177,28 @@ export function traceLocalSpan<T>(
 ): T | Promise<T> {
   const run = () => {
     const parent = parentSpan === undefined ? getLocalScopeParent() : parentSpan
+    const isolateOpenTelemetry = options.isolateOpenTelemetry ?? true
     const span = createLocalSpan({
       ...options,
       parent,
-      isolateOpenTelemetry: true,
+      isolateOpenTelemetry,
     })
-    const execute = () => withLocalSpan(span, () => fn(span))
+    const execute = isolateOpenTelemetry
+      ? () => withLocalSpan(span, () => fn(span))
+      : () => {
+          const { context, trace } = api
+          const publicSpan = options.delegateSpan
+          const publicContext = publicSpan
+            ? trace.setSpan(context.active(), publicSpan)
+            : context.active()
+          return context.with(publicContext, () =>
+            withLocalSpan(
+              span,
+              () => fn(span),
+              trace.getSpanContext(publicContext)
+            )
+          )
+        }
     return options.synchronous
       ? recordSpan({ span, synchronous: true }, execute)
       : recordSpan({ span }, execute)

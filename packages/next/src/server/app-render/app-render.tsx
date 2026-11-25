@@ -126,9 +126,12 @@ import { getTracer, SpanStatusCode } from '../lib/trace/tracer'
 import type { Span } from '../lib/trace/tracer'
 import {
   getActiveLocalSpan,
+  getOpenTelemetrySpan,
   isLocalSpanRecordingEnabled,
+  isOpenTelemetryIsolatedSpan,
   traceLocalSpan,
 } from '../lib/trace/local-span-recorder'
+import { api as otelApi, getTracerInstance } from '../lib/trace/otel-api'
 import {
   isRequestInsightsEnabled,
   startRequestInsight,
@@ -4841,8 +4844,13 @@ function runDevValidationInBackground(
   validationGeneration: DevValidationGeneration
 ): void {
   const validationAbortSignal = validationGeneration.signal
-  // The render's span, active while the render schedules the validation.
-  const renderSpanContext = getTracer().getActiveScopeSpan()?.spanContext()
+  // The render's OpenTelemetry span, active while the render schedules the
+  // validation. With Request Insights the active scope can be a local-only
+  // span, whose ID OpenTelemetry doesn't know, so link to its public span.
+  const renderScopeSpan = getTracer().getActiveScopeSpan()
+  const renderLink = renderScopeSpan
+    ? getOpenTelemetrySpan(renderScopeSpan)?.spanContext()
+    : undefined
 
   void consoleAsyncStorage
     .run({ dim: true }, async () => {
@@ -4863,8 +4871,8 @@ function runDevValidationInBackground(
         return
       }
 
-      return runInDevValidationTrace(ctx, renderSpanContext, () =>
-        runInstantInsightsWithTracing(ctx, async (runSpan) => {
+      return runInDevValidationTrace(ctx, renderLink, () =>
+        runInstantInsightsWithTracing(ctx, renderLink, async (runSpan) => {
           // Read whether the streamed render errored only now that it has fully
           // settled.
           const devRenderDidError = getDevRenderDidError()
@@ -5054,22 +5062,22 @@ type RunInstantInsightsSpan = <T>(
   fn: () => Promise<T>
 ) => Promise<T>
 
-function runInstantInsightsSpan<T>(
-  spanType: AppRenderSpan,
-  spanName: string,
-  fn: () => Promise<T>
-): Promise<T> {
-  return traceLocalSpan(
-    {
-      name: spanName,
-      attributes: {
-        'next.span_category': 'nextjs',
-        'next.span_name': spanName,
-        'next.span_type': spanType,
+function createRunInstantInsightsSpan(
+  isolateOpenTelemetry: boolean
+): RunInstantInsightsSpan {
+  return (spanType, spanName, fn) =>
+    traceLocalSpan(
+      {
+        name: spanName,
+        isolateOpenTelemetry,
+        attributes: {
+          'next.span_category': 'nextjs',
+          'next.span_name': spanName,
+          'next.span_type': spanType,
+        },
       },
-    },
-    fn
-  )
+      fn
+    )
 }
 
 function runWithoutInstantInsightsSpan<T>(
@@ -5088,8 +5096,8 @@ function runWithoutInstantInsightsSpan<T>(
  * children of. The span ends when `fn` settles, with an error status if it
  * rejects.
  *
- * With Request Insights, the validation already runs in a local trace isolated
- * from OpenTelemetry (see `runInstantInsightsWithTracing`), so nothing changes.
+ * With Request Insights, `runInstantInsightsWithTracing` creates this span
+ * instead, as the OpenTelemetry side of its Instant Insights span.
  */
 function runInDevValidationTrace<T>(
   ctx: AppRenderContext,
@@ -5112,8 +5120,19 @@ function runInDevValidationTrace<T>(
   )
 }
 
+/**
+ * Runs the background dev validation in an Instant Insights trace of its own.
+ *
+ * Without OpenTelemetry, that trace is local and isolated: nested Next.js spans
+ * stay out of any SDK context. With OpenTelemetry, the Instant Insights span
+ * also exports the `validate route (app) <page>` root span that
+ * `runInDevValidationTrace` creates without Request Insights, and nested
+ * Next.js spans are exported under it, so enabling Request Insights doesn't
+ * change the OpenTelemetry trace.
+ */
 async function runInstantInsightsWithTracing<T>(
   ctx: AppRenderContext,
+  renderSpanContext: ReturnType<Span['spanContext']> | undefined,
   fn: (runSpan: RunInstantInsightsSpan) => Promise<T>
 ): Promise<T> {
   if (!isRequestInsightsEnabled()) {
@@ -5130,11 +5149,34 @@ async function runInstantInsightsWithTracing<T>(
     url: ctx.url.href,
   }
   startRequestInsight(identity)
+
+  const exportToOpenTelemetry = getTracer().isOpenTelemetryEnabled()
+  let delegateSpan: Span | undefined
+  if (exportToOpenTelemetry) {
+    const spanName = `validate route (app) ${ctx.pagePath}`
+    delegateSpan = getTracerInstance().startSpan(
+      spanName,
+      {
+        root: true,
+        links: renderSpanContext ? [{ context: renderSpanContext }] : undefined,
+        attributes: {
+          'next.span_category': 'nextjs',
+          'next.span_name': spanName,
+          'next.span_type': AppRenderSpan.devValidation,
+          'next.route': ctx.pagePath,
+        },
+      },
+      otelApi.context.active()
+    )
+  }
+
   return runWithRequestInsightsIdentity(identity, () =>
     traceLocalSpan(
       {
         name: 'Instant Insights',
         parentSpan: null,
+        delegateSpan,
+        isolateOpenTelemetry: !exportToOpenTelemetry,
         attributes: {
           'next.span_category': 'nextjs',
           'next.span_name': 'Instant Insights',
@@ -5142,7 +5184,7 @@ async function runInstantInsightsWithTracing<T>(
           'next.route': ctx.pagePath,
         },
       },
-      () => fn(runInstantInsightsSpan)
+      () => fn(createRunInstantInsightsSpan(!exportToOpenTelemetry))
     )
   )
 }
@@ -7035,8 +7077,14 @@ async function runValidationInDev(
   devRenderDidError: boolean,
   validationAbortSignal: AbortSignal
 ): Promise<Array<unknown> | undefined> {
+  // Match the enclosing Instant Insights span: exported to OpenTelemetry only
+  // when that span is.
+  const activeLocalSpan = getActiveLocalSpan()
   const runSpan = isLocalSpanRecordingEnabled()
-    ? runInstantInsightsSpan
+    ? createRunInstantInsightsSpan(
+        activeLocalSpan === undefined ||
+          isOpenTelemetryIsolatedSpan(activeLocalSpan)
+      )
     : runWithoutInstantInsightsSpan
   const { componentMod: ComponentMod, getDynamicParamFromSegment } = ctx
   const loaderTree = ComponentMod.routeModule.userland.loaderTree
