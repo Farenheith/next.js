@@ -1838,6 +1838,9 @@ function assignDefaultsAndValidate(
 
   if (phase === PHASE_DEVELOPMENT_SERVER) {
     result.distDir = join(result.distDir, 'dev')
+    // Durable `"use cache"` entries have a separate opt-in for development.
+    result.experimental.durableUseCacheEntries =
+      !!result.experimental.durableUseCacheEntriesInDev
   }
 
   // Derive the `'use cache'` fill timeout from `staticPageGenerationTimeout`
