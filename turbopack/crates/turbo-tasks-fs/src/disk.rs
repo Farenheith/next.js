@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bincode::{Decode, Encode};
 #[cfg(windows)]
 use omnipath::WinPathExt;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
     runtime::Handle,
     sync::{RwLock, RwLockReadGuard},
@@ -218,25 +218,28 @@ fn content_hash_of(content: &FileContent) -> u128 {
 /// [`content_hash_of`]. Returns [`DELETED_FILE_CONTENT_HASH`] if nothing is at `path`, and `None`
 /// if something other than a regular file is (e.g. a link, which a file write doesn't produce even
 /// when it points to equal bytes).
-fn hash_disk_content(path: &Path) -> io::Result<Option<u128>> {
+fn hash_disk_content(path: &Path) -> io::Result<Option<(u128, Fingerprint)>> {
     use std::io::Read;
 
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => return Ok(None),
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Ok(Some(DELETED_FILE_CONTENT_HASH));
+            return Ok(Some((DELETED_FILE_CONTENT_HASH, Fingerprint::Absent)));
         }
         Err(err) => return Err(err),
     }
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Ok(Some(DELETED_FILE_CONTENT_HASH));
+            return Ok(Some((DELETED_FILE_CONTENT_HASH, Fingerprint::Absent)));
         }
         Err(err) => return Err(err),
     };
-    let permissions = disk_permissions(&file.metadata()?);
+    // Both from the open file, so that they describe the same file.
+    let metadata = file.metadata()?;
+    let permissions = disk_permissions(&metadata);
+    let fingerprint = Fingerprint::from_metadata(&metadata)?;
     let mut hasher = Xxh3Hash128Hasher::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
@@ -247,13 +250,16 @@ fn hash_disk_content(path: &Path) -> io::Result<Option<u128>> {
         hasher.write_bytes(&buffer[..read]);
     }
     hasher.write_value(permissions);
-    Ok(Some(hasher.finish()))
+    Ok(Some((hasher.finish(), fingerprint)))
 }
 
 /// Writes `file` to `path` by writing a temporary file next to it and atomically renaming it into
 /// place. A reader never observes a partially written file, and a running executable at `path` can
 /// keep using the previous file. Creates missing parent directories.
-fn write_file_atomically(path: &Path, file: &File) -> io::Result<()> {
+///
+/// Returns the fingerprint of the installed file, taken from the closed temporary file before it's
+/// moved into place, so that a change at `path` right after the rename isn't taken for this write.
+fn write_file_atomically(path: &Path, file: &File) -> io::Result<Fingerprint> {
     let write = |output: &mut std::fs::File| {
         std::io::copy(&mut file.read(), output)?;
         #[cfg(unix)]
@@ -273,10 +279,11 @@ fn write_file_atomically(path: &Path, file: &File) -> io::Result<()> {
             result => result?,
         };
         write(temporary.as_file_mut())?;
-        temporary
-            .into_temp_path()
-            .persist(path)
-            .map_err(|err| err.error)
+        // Closed first: Windows only settles the modification time when the handle is closed.
+        let temporary = temporary.into_temp_path();
+        let fingerprint = Fingerprint::of(&temporary)?;
+        temporary.persist(path).map_err(|err| err.error)?;
+        Ok(fingerprint)
     }
 
     // `tempfile` isn't available on other targets (e.g. wasi): create a uniquely named temporary
@@ -317,7 +324,9 @@ fn write_file_atomically(path: &Path, file: &File) -> io::Result<()> {
         };
         let result = write(&mut output).and_then(|()| {
             drop(output);
-            std::fs::rename(&temporary_path, path)
+            let fingerprint = Fingerprint::of(&temporary_path)?;
+            std::fs::rename(&temporary_path, path)?;
+            Ok(fingerprint)
         });
         if result.is_err() {
             let _ = std::fs::remove_file(&temporary_path);
@@ -357,7 +366,7 @@ async fn write_content(
     content: &FileContent,
 ) -> Result<()> {
     let _lock = inner.lock_path(full_path.clone()).await;
-    match content {
+    let fingerprint = match content {
         FileContent::Content(file) => {
             let versioned_path = if *WRITE_VERSION {
                 let path = versioned_path_for(full_path, file);
@@ -368,18 +377,18 @@ async fn write_content(
             };
             retry_blocking_custom(
                 || {
-                    write_file_atomically(full_path, file)?;
+                    let fingerprint = write_file_atomically(full_path, file)?;
                     if let Some(versioned_path) = &versioned_path {
                         write_file_atomically(versioned_path, file)?;
                     }
-                    Ok::<(), io::Error>(())
+                    Ok::<_, io::Error>(fingerprint)
                 },
                 |err| err.kind() == ErrorKind::NotFound || can_retry(err),
             )
             .instrument(tracing::info_span!("write file", name = ?**full_path))
             .concurrency_limited(&inner.write_semaphore)
             .await
-            .with_context(|| format!("failed to write to {full_path:?}"))?;
+            .with_context(|| format!("failed to write to {full_path:?}"))?
         }
         FileContent::NotFound => {
             retry_blocking(|| match std::fs::remove_file(&***full_path) {
@@ -390,12 +399,79 @@ async fn write_content(
             .concurrency_limited(&inner.write_semaphore)
             .await
             .with_context(|| format!("removing {full_path:?} failed"))?;
+            Fingerprint::Absent
         }
-    }
+    };
+    inner.record_installed(full_path, fingerprint);
     // Invalidate any read tasks tracking this path so they re-read the new content
     inner.invalidate_from_write(full_path);
     Ok(())
 }
+
+/// Identifies one specific file (or link) on disk, or its absence. Every write replaces the file
+/// atomically, so it gets a new identity even with equal content. Used to notice a written output
+/// that was changed or removed afterwards, e.g. outside of turbo-tasks. Equal fingerprints don't
+/// prove equal content: an edit can keep the length, mode, modification time and file identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fingerprint {
+    Absent,
+    Present {
+        /// Whether the entry is a regular file, a symlink, or something else.
+        kind: u8,
+        /// The permission bits on unix, the readonly flag elsewhere.
+        mode: u32,
+        len: u64,
+        modified_ns: i128,
+        /// The device and inode on unix.
+        id: Option<u128>,
+    },
+}
+
+impl Fingerprint {
+    fn of(path: &Path) -> io::Result<Self> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Self::from_metadata(&metadata),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(Fingerprint::Absent),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn from_metadata(metadata: &std::fs::Metadata) -> io::Result<Self> {
+        let file_type = metadata.file_type();
+        let kind = if file_type.is_file() {
+            0
+        } else if file_type.is_symlink() {
+            1
+        } else {
+            2
+        };
+        let modified_ns = match metadata.modified()?.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => duration.as_nanos() as i128,
+            Err(err) => -(err.duration().as_nanos() as i128),
+        };
+        #[cfg(unix)]
+        let (mode, id) = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                metadata.mode(),
+                Some(((metadata.dev() as u128) << 64) | metadata.ino() as u128),
+            )
+        };
+        #[cfg(not(unix))]
+        let (mode, id) = (metadata.permissions().readonly() as u32, None);
+        Ok(Fingerprint::Present {
+            kind,
+            mode,
+            len: metadata.len(),
+            modified_ns,
+            id,
+        })
+    }
+}
+
+/// The fingerprints of the outputs installed in this session, see [`Fingerprint`].
+#[derive(Default)]
+struct InstalledOutputs(parking_lot::Mutex<FxHashMap<PathBuf, Fingerprint>>);
 
 trait ConcurrencyLimitedExt {
     type Output;
@@ -548,10 +624,55 @@ pub(crate) struct DiskFileSystemInner {
     #[turbo_tasks(debug_ignore, unsafe_ignore)]
     #[bincode(skip)]
     effect_state_storage: EffectStateStorage,
+    /// What each output written by an effect in this session looked like right after it was
+    /// written, see [`CapturedEffect::still_applied`].
+    #[turbo_tasks(debug_ignore, unsafe_ignore)]
+    #[bincode(skip)]
+    installed_outputs: InstalledOutputs,
     map: OperationVc<DiskFileSystemMap>,
 }
 
 impl DiskFileSystemInner {
+    /// Records `fingerprint` as what the output at `path` looks like now that an effect wrote (or
+    /// verified) it. The caller must hold the path's effect claim.
+    fn record_installed(&self, path: &Path, fingerprint: Fingerprint) {
+        self.installed_outputs
+            .0
+            .lock()
+            .insert(path.to_path_buf(), fingerprint);
+    }
+
+    /// Like [`Self::record_installed`], observing the output's fingerprint now. A change at `path`
+    /// between installing it and this observation is taken for the install; used for links, which
+    /// can't be fingerprinted before they're in place.
+    async fn observe_installed(&self, path: &Arc<PathBuf>) {
+        let fingerprint = {
+            let path = path.clone();
+            retry_blocking(move || Fingerprint::of(&path))
+                .concurrency_limited(&self.read_semaphore)
+                .await
+        };
+        match fingerprint {
+            Ok(fingerprint) => self.record_installed(path, fingerprint),
+            Err(_) => {
+                self.installed_outputs.0.lock().remove(&**path);
+            }
+        }
+    }
+
+    /// Whether the output at `path` still looks like it did when an effect last wrote it in this
+    /// session.
+    async fn still_installed(&self, path: &Arc<PathBuf>) -> bool {
+        let Some(recorded) = self.installed_outputs.0.lock().get(&**path).copied() else {
+            return false;
+        };
+        let path = path.clone();
+        retry_blocking(move || Fingerprint::of(&path))
+            .concurrency_limited(&self.read_semaphore)
+            .await
+            .is_ok_and(|fingerprint| fingerprint == recorded)
+    }
+
     pub(crate) fn root_path(&self) -> &Path {
         Path::new(&*self.root)
     }
@@ -1183,6 +1304,7 @@ impl DiskFileSystem {
                 turbo_tasks: turbo_tasks_weak(),
                 tokio_handle: Handle::current(),
                 effect_state_storage: EffectStateStorage::default(),
+                installed_outputs: InstalledOutputs::default(),
                 map,
             }),
         };
@@ -1700,6 +1822,10 @@ impl FileSystem for DiskFileSystem {
                 WRITE_FILE_EFFECT
             }
 
+            async fn still_applied(&self) -> bool {
+                self.inner.still_installed(&self.full_path).await
+            }
+
             async fn apply(&self) -> Result<(), turbo_tasks::ApplyError> {
                 let storage = &self.inner.effect_state_storage;
                 // A recorded result for this content, also a failed write, is returned by
@@ -1756,7 +1882,14 @@ impl FileSystem for DiskFileSystem {
                     .concurrency_limited(&self.inner.read_semaphore)
                     .await
                     .with_context(|| format!("failed to hash {:?}", self.full_path))?;
-                Ok(hash == Some(self.content_hash))
+                let Some((hash, fingerprint)) = hash else {
+                    return Ok(false);
+                };
+                if hash != self.content_hash {
+                    return Ok(false);
+                }
+                self.inner.record_installed(&self.full_path, fingerprint);
+                Ok(true)
             }
         }
 
@@ -1892,9 +2025,18 @@ impl FileSystem for DiskFileSystem {
                 WRITE_LINK_EFFECT
             }
 
+            async fn still_applied(&self) -> bool {
+                self.inner.still_installed(&self.full_path).await
+            }
+
             async fn apply(&self) -> Result<(), turbo_tasks::ApplyError> {
                 let body = self.content.as_ref().map(|content| {
-                    async || self.apply_inner(content).await.map_err(AnyhowWrapper::from)
+                    async || {
+                        self.apply_inner(content).await?;
+                        // Publication holds the claim, so no other effect changed the link since.
+                        self.inner.observe_installed(&self.full_path).await;
+                        Ok(())
+                    }
                 });
                 self.inner
                     .effect_state_storage

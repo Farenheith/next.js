@@ -94,6 +94,15 @@ pub trait CapturedEffect: NonLocalValue + Send + Sync + 'static {
     /// [`EffectStateStorage::matches_applied`].
     fn kind(&self) -> &'static str;
 
+    /// Called before publication skips this effect because [`EffectStateStorage`] records it as
+    /// applied. Returns whether the target still holds it. If not (e.g. it was changed outside of
+    /// turbo-tasks), publication forgets the record and applies the effect again.
+    ///
+    /// Must not block: it may do I/O on spawned tasks.
+    async fn still_applied(&self) -> bool {
+        true
+    }
+
     /// Perform the side effect
     ///
     /// Implementations typically dispatch into [`EffectStateStorage::run_apply`]. Must not publish
@@ -263,6 +272,25 @@ impl EffectStateStorage {
                 result: Ok(()),
             } if *applied_kind == kind && *value_hash == target,
         )
+    }
+
+    /// Forgets that the effect `(kind, value_hash)` was successfully applied for `key`, if that's
+    /// still what the per-key state records, so that it's applied again. Call it with the key's
+    /// claim held.
+    pub fn forget_applied(&self, key: &[u8], kind: &'static str, value_hash: u128) {
+        let entry = self.effect_state.lock().get(key).cloned();
+        let Some(entry) = entry else { return };
+        let mut last_applied = entry.last_applied.lock();
+        if matches!(
+            &*last_applied,
+            EffectLastApplied::Applied {
+                kind: applied_kind,
+                value_hash: applied,
+                result: Ok(()),
+            } if *applied_kind == kind && *applied == value_hash,
+        ) {
+            *last_applied = EffectLastApplied::Unapplied;
+        }
     }
 
     /// Returns true if the per-key state holds `Applied { kind, value_hash == target }`, whatever
@@ -735,14 +763,31 @@ impl Effects {
     /// the one that writes them.
     async fn claim(&self) -> Publication {
         let mut candidates = Vec::new();
+        let mut applied = Vec::new();
         if let Ok(unique) = self.unique_keys.as_ref() {
             for &idx in unique {
                 let effect = &self.captured[idx];
                 let storage = effect.state_storage();
                 let key = effect.key();
-                if !storage.matches_applied(&key, effect.kind(), effect.value_hash()) {
+                if storage.matches_applied(&key, effect.kind(), effect.value_hash()) {
+                    applied.push((key, idx));
+                } else {
                     candidates.push(((storage.id, key), idx));
                 }
+            }
+        }
+        // A recorded effect whose target changed since (e.g. outside of turbo-tasks) is applied
+        // again, instead of being skipped by every attempt.
+        let still_applied = futures::future::join_all(
+            applied
+                .iter()
+                .map(|&(_, idx)| self.captured[idx].still_applied()),
+        )
+        .await;
+        for ((key, idx), still_applied) in applied.into_iter().zip(still_applied) {
+            if !still_applied {
+                let storage = self.captured[idx].state_storage();
+                candidates.push(((storage.id, key), idx));
             }
         }
         candidates.sort_unstable();
@@ -752,7 +797,11 @@ impl Effects {
             let storage = effect.state_storage();
             let claim = storage.claim_for(key.clone()).lock_owned().await;
             if storage.matches_applied(&key, effect.kind(), effect.value_hash()) {
-                continue;
+                // Checked again under the claim: the record may have been written again since.
+                if effect.still_applied().await {
+                    continue;
+                }
+                storage.forget_applied(&key, effect.kind(), effect.value_hash());
             }
             publication.to_apply.push((idx, Some(claim)));
         }

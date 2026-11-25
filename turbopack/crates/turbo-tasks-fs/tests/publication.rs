@@ -933,3 +933,105 @@ async fn permissions_are_part_of_the_content() -> Result<()> {
     assert_eq!(result?, [0o444, 0o664, 0o444]);
     Ok(())
 }
+
+/// An output changed outside of turbo-tasks after it was written is written again by the next
+/// publication, whether its only writer wrote it early or it was written by publication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outputs_changed_outside_are_rewritten() -> Result<()> {
+    let _serial = SERIAL.lock().await;
+    let Run { tt, _dir, root, .. } = run()?;
+    let dir = std::path::PathBuf::from(root.as_str());
+    let result = tt
+        .run_once({
+            let dir = dir.clone();
+            async move {
+                let fs_vc = disk(root).resolve().strongly_consistent().await?;
+                let publish = |op: OperationVc<Effects>| async move {
+                    read_strongly_consistent_and_apply_effects(op, |e| e).await?;
+                    anyhow::Ok(())
+                };
+
+                // Written early by its only writer.
+                let early = capture(write_text(fs_vc, "early.txt".into(), "early".into()));
+                publish(early).await?;
+                fs::write(dir.join("early.txt"), "EARLY")?;
+                publish(early).await?;
+                let early_edited = fs::read_to_string(dir.join("early.txt"))?;
+                fs::remove_file(dir.join("early.txt"))?;
+                publish(early).await?;
+                let early_removed = fs::read_to_string(dir.join("early.txt"))?;
+
+                // Two writers of equal content: written by publication.
+                let first = capture(write_text(fs_vc, "shared.txt".into(), "shared".into()));
+                publish(first).await?;
+                let second = capture(write_content_at(
+                    fs_vc,
+                    "shared.txt".into(),
+                    Some("shared".into()),
+                    1,
+                ));
+                publish(second).await?;
+                fs::write(dir.join("shared.txt"), "SHARED")?;
+                publish(second).await?;
+                let shared_edited = fs::read_to_string(dir.join("shared.txt"))?;
+                fs::remove_file(dir.join("shared.txt"))?;
+                publish(second).await?;
+                let shared_removed = fs::read_to_string(dir.join("shared.txt"))?;
+                anyhow::Ok([early_edited, early_removed, shared_edited, shared_removed])
+            }
+        })
+        .await;
+    tt.stop_and_wait().await;
+    assert_eq!(result?, ["early", "early", "shared", "shared"]);
+    Ok(())
+}
+
+/// Publishing unchanged outputs again doesn't rewrite them, whether their only writer wrote them
+/// early or publication wrote them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_outputs_are_not_rewritten() -> Result<()> {
+    let _serial = SERIAL.lock().await;
+    let Run { tt, _dir, root, .. } = run()?;
+    let dir = std::path::PathBuf::from(root.as_str());
+    let identity = move |name: &str| -> Result<(std::time::SystemTime, u64)> {
+        let metadata = fs::metadata(dir.join(name))?;
+        #[cfg(unix)]
+        let id = std::os::unix::fs::MetadataExt::ino(&metadata);
+        #[cfg(not(unix))]
+        let id = metadata.len();
+        Ok((metadata.modified()?, id))
+    };
+    let result = tt
+        .run_once({
+            let identity = identity.clone();
+            async move {
+                let fs_vc = disk(root).resolve().strongly_consistent().await?;
+                let publish = |op: OperationVc<Effects>| async move {
+                    read_strongly_consistent_and_apply_effects(op, |e| e).await?;
+                    anyhow::Ok(())
+                };
+                let early = capture(write_text(fs_vc, "early.txt".into(), "early".into()));
+                publish(early).await?;
+                let shared = capture(write_text(fs_vc, "shared.txt".into(), "shared".into()));
+                publish(shared).await?;
+                let other = capture(write_content_at(
+                    fs_vc,
+                    "shared.txt".into(),
+                    Some("shared".into()),
+                    1,
+                ));
+                publish(other).await?;
+                let before = (identity("early.txt")?, identity("shared.txt")?);
+                for _ in 0..3 {
+                    publish(early).await?;
+                    publish(other).await?;
+                }
+                anyhow::Ok((before, (identity("early.txt")?, identity("shared.txt")?)))
+            }
+        })
+        .await;
+    tt.stop_and_wait().await;
+    let (before, after) = result?;
+    assert_eq!(before, after, "an unchanged output was rewritten");
+    Ok(())
+}
